@@ -1,0 +1,47 @@
+<?xml version="1.0"?> <!--*-nxml-*-->
+<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-BUS Bus Configuration 1.0//EN"
+        "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+
+<!--
+  SPDX-License-Identifier: LGPL-2.1+
+
+  This file is part of systemd.
+
+  systemd is free software; you can redistribute it and/or modify it
+  under the terms of the GNU Lesser General Public License as published by
+  the Free Software Foundation; either version 2.1 of the License, or
+  (at your option) any later version.
+-->
+
+<busconfig>
+
+        <policy user="root">
+                <allow own="@KMPP_BUS_NAME@"/>
+
+                <!-- Root clients can do everything -->
+                <allow send_destination="@KMPP_BUS_NAME@"/>
+                <allow receive_sender="@KMPP_BUS_NAME@"/>
+
+                <!-- systemd may receive activator requests -->
+                <allow receive_interface="@KMPP_BUS_NAME@.Activator"
+                       receive_member="ActivationRequest"/>
+        </policy>
+
+        <policy user="@KMPP_USER_NAME@">
+                <allow own="@KMPP_BUS_NAME@"/>
+
+                <!-- kmpp clients can do everything -->
+                <allow send_destination="@KMPP_BUS_NAME@"/>
+                <allow receive_sender="@KMPP_BUS_NAME@"/>
+
+                <!-- systemd may receive activator requests -->
+                <allow receive_interface="@KMPP_BUS_NAME@.Activator"
+                       receive_member="ActivationRequest"/>
+        </policy>
+
+        <!-- default clients can do everything -->
+        <policy context="default">
+                <allow send_destination="@KMPP_BUS_NAME@"/>
+        </policy>
+
+</busconfig>

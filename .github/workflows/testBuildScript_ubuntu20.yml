@@ -1,0 +1,23 @@
+name: Test build.sh - UBUNTU 20.04
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+    branches:
+      - '**'
+
+permissions: read-all
+
+jobs:
+  build:
+    runs-on: ubuntu-20.04
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v2
+    
+    - name: execute script
+      run: |
+        sh scripts/build.sh

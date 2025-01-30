@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <TargetFramework>netcoreapp3.1</TargetFramework>
+    <Description> Key Material and Protection Platform (KMPP) is a platform used to protect and isolate keys in Linux-based environments.
+      This .NET library provides a wrapper for KMPP, allowing to Import keys and Validate key IDs.
+      Key Isolation technique allows hosting the key material securely - protected and separated (isolated) - and performing Private Keys cryptographic operations so that the key material is never exposed to the calling app or other apps on the same system.
+      By doing so, the Key Isolation technique decreases the likelihood of Key Exfiltration by an attacker. Its promise is to make sure that keys on a system cannot be exported or taken off the machine they were created on or imported into.
+    </Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="3.1.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="3.1.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="3.1.0" />
+  </ItemGroup>
+
+</Project>

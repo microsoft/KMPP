@@ -1,0 +1,21 @@
+#!/bin/sh
+
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+groupname="@KMPPCTRL_ALLOW_GROUP@"
+username="@KMPP_USER_NAME@"
+
+if grep -qE "^$groupname:" /etc/group >/dev/null 2>&1; then
+  echo "Group $groupname already exists"
+else
+  sudo groupadd --system $groupname
+  echo "Group $groupname added"
+fi
+
+if id "$username" >/dev/null 2>&1; then
+  echo "User $username already exists"
+else
+  sudo useradd -G $groupname --system $username
+  echo "User $username added"
+fi

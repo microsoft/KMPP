@@ -1,0 +1,31 @@
+#!/bin/sh
+ 
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+username="@KMPP_USER_NAME@"
+TPM_DEVICE="/dev/tpm*"
+SYSTEM_DIR="/usr/lib/systemd/system"
+
+tpmEnabled=$(echo "@KMPP_GENERAL_PURPOSE_TARGET@" | tr '[:upper:]' '[:lower:]')
+tpmExist=$(ls /dev/tpm* >/dev/null 2>&1 && grep -qE "^tss:" /etc/group >/dev/null 2>&1 && echo "true" || echo "false")
+
+# Add user to tss group only if TPM enabled and exists
+if [ "$tpmEnabled" = "on" ] && [ "$tpmExist" = "true" ]; then
+
+  sudo usermod -aG tss $username
+  echo "User $username was added to tss group"
+
+  # Take the relevant service unit file
+  mv ${SYSTEM_DIR}/dbus-com.microsoft.kmpp.service ${SYSTEM_DIR}/dbus-com.microsoft.kmpp.service.default
+  mv ${SYSTEM_DIR}/dbus-com.microsoft.kmpp.service.tpm ${SYSTEM_DIR}/dbus-com.microsoft.kmpp.service
+fi
+
+sudo sed -i 's/"\/usr/"/' /usr/lib/systemd/system/dbus-com.microsoft.kmpp.service
+sudo sed -i 's|/bin/sh|/bin/bash|' /usr/lib/systemd/system/dbus-com.microsoft.kmpp.service
+ 
+sudo systemctl preset dbus-com.microsoft.kmpp.service
+sudo systemctl start dbus-com.microsoft.kmpp.service
+ 
+sudo systemctl start dbus-com.microsoft.kmppctrl.service
+

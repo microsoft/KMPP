@@ -1,0 +1,44 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[Unit]
+Description=KMPPctrl service
+
+# This mount is not working yet. Uncomment this when it's fixed.
+# RequiresMountsFor=/var/opt/msft/
+
+# This reminds us our dependency and prevents this service
+# from failing to start if dependency is not met.
+Wants=dbus-@KMPP_BUS_NAME@.service @KMPP_SYSTEMD_DEPENDENCY@
+After=dbus-@KMPP_BUS_NAME@.service @KMPP_SYSTEMD_DEPENDENCY@
+
+[Service]
+Type=dbus
+BusName=@KMPPCTRL_BUS_NAME@
+ExecStart=/usr/bin/@KMPP_USER_NAME@ctrlservice @KMPPCTRL_SERVICE_ARGS@
+User=@KMPP_USER_NAME@
+
+# To write traceLog output to a file.
+# Set "-disableVerbose" to disable verbose output to file
+# ExecStart=/usr/bin/@KMPP_USER_NAME@ctrlservice "-enableTraceLogTest" "-t/tmp/@KMPP_USER_NAME@ctrlservice.log"
+
+# To enable verbose tracing
+# ExecStart=/usr/bin/@KMPP_USER_NAME@ctrlservice "-enableVerbose"
+
+# We may want to write log files to /tmp. Want to remain after service exits.
+# PrivateTmp=yes
+
+# Following still allows access to /dev/shm
+PrivateDevices=yes
+
+# Disable network access
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+
+Slice=@KMPP_USER_NAME@.slice
+
+# Default is to auto start kmppctrlservice on the
+# first method call
+
+[Install]
+Alias=@KMPP_USER_NAME@ctrl.service

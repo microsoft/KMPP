@@ -1,0 +1,13 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[Unit]
+Description=KMPP service
+Before=slices.target
+DefaultDependencies=no
+
+[Slice]
+CPUAccounting=true
+CPUQuota=50%
+MemoryAccounting=true
+MemoryMax=20M

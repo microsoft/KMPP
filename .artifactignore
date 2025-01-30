@@ -1,0 +1,4 @@
+# Do not try to upload git submodules when publishing ADO artifacts
+
+**/SymCrypt/
+**/3rdparty/

@@ -1,0 +1,10 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[ kmpp_config ]
+# Available types: process, tz, tpm
+keyiso_solution_type = process
+
+[ tpm_isolation ]
+tcti = device:/dev/tpmrm0
+srk_nvram_index = 0x1500020

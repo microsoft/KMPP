@@ -1,0 +1,85 @@
+# This workflow performs CodeQL analysis on both C/C++ and C# projects
+name: "CodeQL Analysis for C/C++ and C#"
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  schedule:
+    - cron: '20 22 * * 2' # Weekly scheduled scan
+
+jobs:
+  analyze:
+    name: Analyze (${matrix.language})
+    runs-on: ubuntu-20.04
+    permissions:
+      # Required permissions for the workflow
+      security-events: write
+      packages: read
+      actions: read
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: c-cpp
+            build-mode: manual
+          - language: csharp
+            build-mode: manual
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    # Initialize CodeQL for the specified language
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v3
+      with:
+        languages: ${{ matrix.language }}
+        build-mode: ${{ matrix.build-mode }}
+
+    # Custom build step for C/C++ projects (manual build mode)
+    - if: matrix.language == 'c-cpp'
+      name: Build C/C++ Project
+      run: |
+        sudo apt-get update  
+        sudo apt-get install -y pkg-config cmake libcurl4-openssl-dev libglib2.0-dev libgtest-dev libdbus-1-dev uuid-dev libssl-dev build-essential googletest libtss2-dev 
+        curl -sSL -O https://packages.microsoft.com/config/ubuntu/20.04/packages-microsoft-prod.deb
+        if [ -f packages-microsoft-prod.deb ]; then
+            sudo dpkg -i packages-microsoft-prod.deb
+            sudo rm packages-microsoft-prod.deb
+        else
+            echo "Failed to download packages-microsoft-prod.deb"
+            exit 1
+        fi
+        sudo apt-get update
+        sudo apt search symcrypt
+        echo "deb https://packages.microsoft.com/ubuntu/20.04/prod testing main" | sudo tee /etc/apt/sources.list.d/microsoft-test.list
+        sudo apt-get update
+        sudo apt install -y symcrypt
+        # Configure CMake
+        cmake -S . -B build
+        # Build the project
+        cmake --build build
+        
+    - if: matrix.language == 'csharp'
+      name: Build C# Project with .NET Core SDK 3.1
+      run: |
+        # Update packages and install .NET Core SDK 3.1
+        sudo apt-get update
+        sudo apt-get install -y apt-transport-https
+        wget https://packages.microsoft.com/config/ubuntu/20.04/packages-microsoft-prod.deb -O packages-microsoft-prod.deb
+        sudo dpkg -i packages-microsoft-prod.deb
+        sudo apt-get update
+        sudo apt-get install -y dotnet-sdk-3.1
+        cd tools/DotNetKMPP
+        dotnet build
+        
+        
+    # Perform CodeQL analysis
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v3
+      with:
+        category: "/language:${{ matrix.language }}"

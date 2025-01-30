@@ -1,0 +1,46 @@
+#!/bin/sh
+	
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+#remove the kmpp related services
+services="dbus-com.microsoft.kmpp.service dbus-com.microsoft.kmppctrl.service kmpp.slice"
+service_removed=0
+for service_name in $services; do
+  # Check if the service is running or enabled
+  if systemctl is-active "$service_name" > /dev/null || systemctl is-enabled "$service_name" > /dev/null; then
+    echo "Stopping and disabling service $service_name..."
+    service_removed=1
+    sudo systemctl stop "$service_name"
+    sudo systemctl disable "$service_name"
+
+    # Remove the service
+    echo "Removing service $service_name..."
+    sudo systemctl --quiet --now mask "$service_name"
+
+    sudo rm /etc/systemd/system/"$service_name" # rm symlinks that might be related
+    sudo rm /usr/lib/systemd/system/"$service_name" # rm symlinks that might be related
+  fi
+done
+
+if [ $service_removed -eq 1 ]; then
+    echo "Services stopped and disabled successfully."
+    sudo systemctl daemon-reload
+    sudo systemctl reset-failed
+fi
+
+# remove kmpp related group and user
+groupname="@KMPPCTRL_ALLOW_GROUP@"
+username="@KMPP_USER_NAME@"
+
+if grep -qE "^$groupname:" /etc/group >/dev/null 2>&1; then
+  echo "Group $groupname exists. Removing..."
+  sudo groupdel "$groupname"
+  echo "Group $groupname removed successfully."
+fi
+
+if id "$username" >/dev/null 2>&1; then
+  echo "User $username exists. Removing..."
+  sudo userdel "$username"
+  echo "User $username removed successfully."
+fi

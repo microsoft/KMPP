@@ -1,0 +1,57 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[Unit]
+Description=KMPP service
+
+# This mount is not working yet. Uncomment this when it's fixed.
+# RequiresMountsFor=/var/opt/msft/
+
+# This reminds us our dependency and prevents this service
+# from failing to start if dependency is not met.
+Requires=@KMPP_SYSTEMD_DEPENDENCY@
+After=@KMPP_SYSTEMD_DEPENDENCY@
+
+[Service]
+Type=dbus
+BusName=@KMPP_BUS_NAME@
+ExecStart=/usr/bin/@KMPP_USER_NAME@service @KMPP_SERVICE_ARGS@
+User=@KMPP_USER_NAME@
+
+PermissionsStartOnly=true
+ExecStartPre=/bin/bash -c "mkdir -p @KMPP_ROOT_DIR@{,/certs,/disallowed}"
+ExecStartPre=/bin/bash -c "mkdir -p @KMPP_PRIVATE_ROOT_DIR@{,/private}"
+ExecStartPre=/bin/bash -c "chown @KMPP_USER_NAME@:@KMPP_USER_NAME@ @KMPP_ROOT_DIR@{,/certs,/disallowed}"
+ExecStartPre=/bin/bash -c "chown @KMPP_USER_NAME@:@KMPP_USER_NAME@ @KMPP_PRIVATE_ROOT_DIR@{,/private}"
+ExecStartPre=/bin/bash -c "chmod 0755 @KMPP_ROOT_DIR@{,/certs,/disallowed}"
+ExecStartPre=/bin/bash -c "chmod 0700 @KMPP_PRIVATE_ROOT_DIR@{,/private}"
+
+# To write traceLog output to a file.
+# Set "-disableVerbose" to disable verbose output to file
+# ExecStart=/usr/bin/kmppservice "-enableTraceLogTest" "-t/tmp/kmppservice.log" 
+
+# To enable verbose tracing
+# ExecStart=/usr/bin/kmppservice "-enableVerbose"
+
+# To set key hash capacity (Number of opened keys opened at the same time)
+# ExecStart=/usr/bin/kmppservice "-keyCacheCapacity=30"
+
+# We may want to write log files to /tmp. Want to remain after service exits.
+# PrivateTmp=yes
+
+# Following still allows access to /dev/shm
+PrivateDevices=yes
+
+# Disable network access
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+
+Slice=@KMPP_USER_NAME@.slice
+
+# Default is to auto start kmppservice on the
+# first method call
+
+# The following will start kmppservice at boot
+[Install]
+WantedBy=@KMPP_SYSTEMD_WANTEDBY@
+Alias=@KMPP_USER_NAME@.service

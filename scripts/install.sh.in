@@ -1,0 +1,35 @@
+#!/bin/sh
+
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+sudo mkdir -p ${KMPP_PRIVATE_ROOT_DIR} /var/msft
+
+sudo ln -s /${CMAKE_INSTALL_LIBDIR}/engines-1.1/kmpppfx.so  /${CMAKE_INSTALL_LIBDIR}/engines-1.1/mscryptpfx.so
+
+sudo groupadd --system @KMPPCTRL_ALLOW_GROUP@
+sudo useradd -G @KMPPCTRL_ALLOW_GROUP@ --system @KMPP_USER_NAME@
+ 
+sudo install -Dm 0444 ${CMAKE_SOURCE_DIR}/certs/certs.pem /var/msft/kmpp/certs.pem
+ 
+sudo systemctl disable dbus-com.microsoft.kmpp.service
+ 
+sudo install -Dm 0444 ${CMAKE_BINARY_DIR}/service/dbus-com.microsoft.kmpp.service /usr/lib/systemd/system/dbus-com.microsoft.kmpp.service
+sudo install -Dm 0444 ${CMAKE_BINARY_DIR}/service/dbus-com.microsoft.kmppctrl.service /usr/lib/systemd/system/dbus-com.microsoft.kmppctrl.service
+sudo install -Dm 0444 ${CMAKE_SOURCE_DIR}/kmppservice/kmpp.slice /usr/lib/systemd/system/kmpp.slice
+ 
+sudo sed -i 's/"\/usr/"/' /usr/lib/systemd/system/dbus-com.microsoft.kmpp.service
+sudo sed -i 's|/bin/sh|/bin/bash|' /usr/lib/systemd/system/dbus-com.microsoft.kmpp.service
+ 
+sudo systemctl daemon-reload
+
+sudo systemctl enable dbus-com.microsoft.kmppctrl.service
+sleep 1
+sudo systemctl restart dbus-com.microsoft.kmppctrl.service
+
+sudo systemctl enable dbus-com.microsoft.kmpp.service
+sleep 1
+sudo systemctl start dbus-com.microsoft.kmpp.service
+
+sleep 1
+sudo systemctl restart dbus-com.microsoft.kmpp.service

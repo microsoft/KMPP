@@ -1,0 +1,11 @@
+prefix=/usr
+exec_prefix=/usr
+libdir=/usr/lib
+includedir=/usr/include
+
+Name: TinyCBOR
+Description: A tiny CBOR encoder and decoder library
+Version: 0.6.0
+Libs: -L${libdir} -ltinycbor
+Libs.private: -lm
+Cflags: -I${includedir}/tinycbor

@@ -1,0 +1,25 @@
+#!/bin/sh
+
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+sudo systemctl stop dbus-com.microsoft.kmpp.service
+sudo systemctl disable dbus-com.microsoft.kmpp.service
+
+sudo systemctl stop dbus-com.microsoft.kmppctrl.service
+sudo systemctl disable dbus-com.microsoft.kmppctrl.service
+
+sudo rm -f /usr/lib/systemd/system/dbus-com.microsoft.kmpp.service
+sudo rm -f /usr/lib/systemd/system/dbus-com.microsoft.kmppctrl.service
+sudo rm -f /usr/lib/systemd/system/kmpp.slice
+
+sudo systemctl daemon-reload
+
+sudo rm -rf ${KMPP_PRIVATE_ROOT_DIR}
+sudo rm -rf /var/msft
+sudo rm -rf /var/opt/msft/kmpp
+
+sudo rm /${CMAKE_INSTALL_LIBDIR}/engines-1.1/mscryptpfx.so
+
+sudo groupdel @KMPPCTRL_ALLOW_GROUP@
+sudo userdel -f @KMPP_USER_NAME@

@@ -1,0 +1,8 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[D-BUS Service]
+Name=@KMPP_BUS_NAME@
+Exec=/usr/bin/@KMPP_USER_NAME@service
+User=@KMPP_USER_NAME@
+SystemdService=dbus-@KMPP_BUS_NAME@.service
