@@ -1,9 +1,9 @@
 # Introduction
 
-The Key Material Protection Platform (KMPP) is designed to safeguard TLS keys in Linux-based environments. It utilizes a Key Isolation technique, which hosts the key material in an isolated space and performs cryptographic operations on behalf of the calling application. This ensures that the key material is not exposed to the calling application or other applications on the same system. By doing so, it significantly reduces the risk of key exfiltration by attackers. The primary objective of KMPP is to ensure that key material cannot be exported or removed from the machine where it was created or imported.
+Key Material Protection Platform (KMPP) is used to protect TLS keys in Linux-based environments. It uses Key Isolation technique, that allows to host the key material in an isolated space and perform Private Keys cryptographic operations, so that the key material is not exposed to the calling app or other apps on the same system. By doing so, it decreases the likelihood of key exfiltration by an attacker.
 
 ## Prerequisites
-- OpenSSL	version 1.1.1 or 3.0.2 <br>
+- OpenSSL version 1.1.1 or 3.0.2 <br>
 - SymCrypt - Microsoft core cryptographic library <br>
 - TSS - TPM2 Software Stack (already installed in Azure Linux 2.0) 
 
