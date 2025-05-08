@@ -50,7 +50,7 @@ static int _rsa_cipher_set_ctx_params(KEYISO_PROV_RSA_CTX *ctx, const OSSL_PARAM
     if (params == NULL)
         return STATUS_OK;
 
-    if (ctx == NULL || ctx->provKey == NULL || ctx->provKey->provCtx == NULL || ctx->mdInfoCtx == NULL || ctx->provKey->keyCtx == NULL) {
+    if (ctx == NULL || ctx->provKey == NULL || ctx->provKey->provCtx == NULL || ctx->mdInfoCtx == NULL) {
         KMPPerr(KeyIsoErrReason_InvalidParams);
         return STATUS_FAILED;
     }
@@ -112,39 +112,21 @@ static int _rsa_cipher_set_ctx_params(KEYISO_PROV_RSA_CTX *ctx, const OSSL_PARAM
 
     p = OSSL_PARAM_locate_const(params, OSSL_ASYM_CIPHER_PARAM_OAEP_LABEL);
     if (p != NULL) {
-        // Verify that the key is new. If not, print a warning as OAEP label is not supported.
-        // Note that if the key is new but the service is old, it will fail when
-        // attempting to open the key during the cryptographic operation.
-        if (!ctx->provKey->keyCtx->isP8Key) {
-            KEYISOP_trace_log_error(NULL, KEYISOP_TRACELOG_WARNING_FLAG, KEYISOP_PROVIDER_TITLE,"", "Warning - OAEP label is not supported with this key. Ignoring OAEP label.");
-            return STATUS_OK;
-        }
-
         void* tmpLabel = NULL;
-        size_t tmpLabelLen = 0;
+        size_t tmpLabellen;
 
-        if (!OSSL_PARAM_get_octet_string(p, &tmpLabel, 0, &tmpLabelLen)) {
+        if (!OSSL_PARAM_get_octet_string(p, &tmpLabel, 0, &tmpLabellen)) {
             KMPPerr(KeyIsoErrReason_FailedToGetParams);
             return STATUS_FAILED;
         }
-
-        // Validation check of the label and labelLen
-        if ((ctx->padding != RSA_PKCS1_OAEP_PADDING) || (tmpLabel != NULL && tmpLabelLen == 0) || (tmpLabelLen > 0 && tmpLabel == NULL)) {
-            if(tmpLabel)
-                KeyIso_free(tmpLabel);
-            KMPPerr(KeyIsoErrReason_FailedToSetParams);
-            return STATUS_FAILED;
-        }
-
-        if (ctx->oaepLabel)
-            KeyIso_free(ctx->oaepLabel);
-
+        KeyIso_free(ctx->oaepLabel);
         ctx->oaepLabel = (unsigned char*)tmpLabel;
-        ctx->oaepLabelLen = tmpLabelLen;
+        ctx->oaepLabelLen = tmpLabellen;
     }
 
     return STATUS_OK;
 }
+
 
 static int _rsa_cipher_init(KEYISO_PROV_RSA_CTX *ctx, KEYISO_PROV_PKEY *provKey, const OSSL_PARAM params[], int operation)
 {
@@ -179,63 +161,36 @@ static int _rsa_cipher_decrypt_init(KEYISO_PROV_RSA_CTX *ctx, KEYISO_PROV_PKEY *
 static int _rsa_cipher_decrypt(KEYISO_PROV_RSA_CTX *ctx, unsigned char *out, size_t *outLen,
     ossl_unused size_t outSize, const unsigned char *in, size_t inLen)
 {
-    KEYISOP_trace_log(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_PROVIDER_TITLE, "Start");
+	KEYISOP_trace_log(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_PROVIDER_TITLE, "Start");
+
+    int resultLen;
+    int ret = STATUS_FAILED;
    
-    const unsigned char *from = NULL;
-    
     // Start measuring time for metrics
     START_MEASURE_TIME();
 
     if (!ctx || !ctx->provKey || !ctx->provKey->keyCtx || !ctx->provKey->pubKey) {
-        KMPPerr(KeyIsoErrReason_InvalidParams);
-        return STATUS_FAILED;
+		KMPPerr(KeyIsoErrReason_InvalidParams);
+		return ret;
     }
        
-    // First call with NULL buffer is to determine the required buffer size
+	// First call with NULL buffer is to determine the required buffer size
     if (out == NULL) {
         *outLen = (int32_t)KeyIso_get_bn_param_len(ctx->provKey->pubKey, OSSL_PKEY_PARAM_RSA_N, NULL);
         return STATUS_OK;
     }
 
-    // For OAEP, validate the label if provided
-    if (ctx->padding == RSA_PKCS1_OAEP_PADDING && ctx->oaepLabelLen > 0) {
-        if (ctx->oaepLabel == NULL) {
-            KMPPerr(KeyIsoErrReason_InvalidParams);
-            return STATUS_FAILED;
-        }
-
-        // Validate input buffer when length is non-zero
-        if (in == NULL && inLen > 0) {
-            KMPPerr(KeyIsoErrReason_InvalidParams);
-            return STATUS_FAILED;
-        }
-
-        size_t totalLen = inLen + ctx->oaepLabelLen;
-        from = (unsigned char *)KeyIso_zalloc(totalLen);
-        if (from == NULL) {
-            return STATUS_FAILED;
-        }
-
-        if (inLen > 0) {
-            memcpy((void *)from, in, inLen);
-        }
-        memcpy((void *)(from + inLen), ctx->oaepLabel, ctx->oaepLabelLen);
-    }
-
-    // Return value is the actual len     
-    int resultLen = KeyIso_CLIENT_rsa_private_decrypt(ctx->provKey->keyCtx, inLen, from ? from : in, *outLen, out, ctx->padding, ctx->oaepLabelLen);
-    int ret = resultLen <= INT_MAX;
+    // Return value is the actual len    
+    resultLen = KeyIso_CLIENT_rsa_private_decrypt(ctx->provKey->keyCtx, inLen, in, *outLen, out, ctx->padding);
+    ret = resultLen <= INT_MAX;
     *outLen = ret ? (size_t)resultLen : STATUS_FAILED;
 
-    STOP_MEASURE_TIME(KeyisoKeyOperation_RsaPrivDec);
+	STOP_MEASURE_TIME(KeyisoKeyOperation_RsaPrivDec);
 
 #ifdef KEYS_IN_USE_AVAILABLE    
-    // KeyInUseToDo: p_scossl_keysinuse_on_decrypt(ctx->provKey->keysInUseCtx);    
+    //KeyInUseToDo: p_scossl_keysinuse_on_decrypt(ctx->provKey->keysInUseCtx);    
 #endif
     
-    if (from != NULL) {
-        KeyIso_free((void *)from);
-    }
     return ret;
 }
 

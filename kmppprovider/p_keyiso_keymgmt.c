@@ -227,6 +227,73 @@ static int _rsa_keymgmt_get_params(KEYISO_PROV_PKEY *pKey, OSSL_PARAM params[])
     return STATUS_OK;
 }
 
+static const OSSL_PARAM* _cleanup_keymgmt_settable_params(int ret, KeyIsoErrReason reason, EVP_PKEY_CTX *ctx,const OSSL_PARAM *params) 
+{
+    if (ret != STATUS_OK) {
+        KMPPerr(reason);
+    }
+
+    if (ctx)
+        EVP_PKEY_CTX_free(ctx);
+    
+    return params;
+}
+
+#define _CLEANUP_KEYMGMT_SETTABLE_PARAMS(ret, reason) \
+        _cleanup_keymgmt_settable_params(ret, reason, ctx, params)
+
+static const OSSL_PARAM* _keymgmt_settable_params(KEYISO_PROV_PROVCTX* provCtx, char* algName)
+{
+    KEYISOP_trace_log(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_PROVIDER_TITLE, "Start");
+
+    const OSSL_PARAM *params = NULL;
+    EVP_PKEY_CTX *ctx = NULL;
+
+    if (!provCtx || !algName) {
+        return _CLEANUP_KEYMGMT_SETTABLE_PARAMS(STATUS_FAILED, KeyIsoErrReason_InvalidParams);
+    }
+ 
+    ctx = EVP_PKEY_CTX_new_from_name(NULL, algName, KEYISO_OSSL_DEFAULT_PROV_PROPQ);
+    if (!ctx) {
+        return _CLEANUP_KEYMGMT_SETTABLE_PARAMS(STATUS_FAILED, KeyIsoErrReason_FailedToGetKeyCtx);
+    }
+
+    params = EVP_PKEY_fromdata_settable(ctx, OSSL_KEYMGMT_SELECT_PUBLIC_KEY);
+    if (!params) {
+        return _CLEANUP_KEYMGMT_SETTABLE_PARAMS(STATUS_FAILED, KeyIsoErrReason_OperationFailed);
+    }
+
+    return _CLEANUP_KEYMGMT_SETTABLE_PARAMS(STATUS_OK, KeyIsoErrReason_NoError);
+}
+
+// Gets the table of parameters that can be set in the RSA key management context
+static const OSSL_PARAM* _rsa_keymgmt_settable_params(KEYISO_PROV_PROVCTX* provCtx)
+{
+   KEYISOP_trace_log(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_PROVIDER_TITLE, "Start");
+
+   return _keymgmt_settable_params(provCtx, KEYISO_NAME_RSA);
+}
+
+// Sets the parameters of the key management context
+static int _keymgmt_set_params(KEYISO_PROV_PKEY* pkey, OSSL_PARAM params[])
+{
+    KEYISOP_trace_log(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_PROVIDER_TITLE, "Start");
+
+    if (!pkey) {
+        KMPPerr(KeyIsoErrReason_InvalidParams);
+        return STATUS_FAILED;
+    }
+
+    if (params == NULL)
+        return STATUS_OK;
+
+    if (!EVP_PKEY_set_params(pkey->pubKey, params)) {
+        KMPPerr(KeyIsoErrReason_FailedToSetParams);
+        return STATUS_FAILED;
+    }
+
+    return STATUS_OK;
+}
 
 // Matches two key management contexts based on the specified selection
 static int _keymgmt_match(const KEYISO_PROV_PKEY *pkey1, const KEYISO_PROV_PKEY *pkey2, int selection)
@@ -685,6 +752,8 @@ static KEYISO_PROV_PKEY* _rsa_keymgmt_gen(KEYISO_PROV_RSA_GEN_CTX* genCtx, ossl_
      { OSSL_FUNC_KEYMGMT_MATCH, (void(*)(void))_keymgmt_match },
      { OSSL_FUNC_KEYMGMT_GET_PARAMS, (void(*)(void))_rsa_keymgmt_get_params },
      { OSSL_FUNC_KEYMGMT_GETTABLE_PARAMS, (void(*)(void))_rsa_keymgmt_gettable_params },
+     { OSSL_FUNC_KEYMGMT_SET_PARAMS, (void(*)(void))_keymgmt_set_params },
+     { OSSL_FUNC_KEYMGMT_SETTABLE_PARAMS, (void(*)(void))_rsa_keymgmt_settable_params },
      { OSSL_FUNC_KEYMGMT_QUERY_OPERATION_NAME, (void (*)(void))_rsa_keymgmt_query },
      { OSSL_FUNC_KEYMGMT_IMPORT_TYPES, (void (*)(void))_rsa_keymgmt_export_import_types }, 
      { OSSL_FUNC_KEYMGMT_IMPORT, (void (*)(void))_rsa_keymgmt_import },
@@ -707,6 +776,8 @@ static KEYISO_PROV_PKEY* _rsa_keymgmt_gen(KEYISO_PROV_RSA_GEN_CTX* genCtx, ossl_
      { OSSL_FUNC_KEYMGMT_MATCH, (void(*)(void))_keymgmt_match },
      { OSSL_FUNC_KEYMGMT_GET_PARAMS, (void(*)(void))_rsa_keymgmt_get_params },
      { OSSL_FUNC_KEYMGMT_GETTABLE_PARAMS, (void(*)(void))_rsa_keymgmt_gettable_params },
+     { OSSL_FUNC_KEYMGMT_SET_PARAMS, (void(*)(void))_keymgmt_set_params },
+     { OSSL_FUNC_KEYMGMT_SETTABLE_PARAMS, (void(*)(void))_rsa_keymgmt_settable_params },
      { OSSL_FUNC_KEYMGMT_QUERY_OPERATION_NAME, (void (*)(void))_rsa_keymgmt_query },
      { OSSL_FUNC_KEYMGMT_IMPORT_TYPES, (void (*)(void))_rsa_keymgmt_export_import_types }, 
      { OSSL_FUNC_KEYMGMT_IMPORT, (void (*)(void))_rsa_keymgmt_import },

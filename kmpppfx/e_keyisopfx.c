@@ -843,8 +843,7 @@ static int kmpppfx_rsa_priv_dec(int flen, const unsigned char *from,
             from,
 	        RSA_size(rsa),
             to,
-            padding,
-            0);
+            padding);
     } else {
         const RSA_METHOD *ossl_rsa_meth = RSA_get_default_method();
         PFN_RSA_meth_priv_dec pfn_rsa_meth_priv_dec = RSA_meth_get_priv_dec(ossl_rsa_meth);

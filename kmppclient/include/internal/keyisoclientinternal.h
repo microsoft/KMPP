@@ -84,7 +84,7 @@ struct client_msg_handler_functions_table_st {
     int (*init_key)(KEYISO_KEY_CTX *keyCtx, int keyLength, const unsigned char *keyBytes, const char *salt);
     void (*free_keyCtx)(KEYISO_KEY_CTX *keyCtx);
     void (*close_key)(KEYISO_KEY_CTX *keyCtx);
-    int (*rsa_private_encrypt_decrypt)(KEYISO_KEY_CTX *keyCtx, int decrypt, int flen, const unsigned char *from, int tlen, unsigned char *to, int padding, int labelLen);
+    int (*rsa_private_encrypt_decrypt)(KEYISO_KEY_CTX *keyCtx, int decrypt, int flen, const unsigned char *from, int tlen, unsigned char *to, int padding);
     int (*ecdsa_sign)(KEYISO_KEY_CTX *keyCtx, int type, const unsigned char *dgst, int dlen, unsigned char *sig, unsigned int sigLen, unsigned int *outLen);
     int (*import_symmetric_key)(const uuid_t correlationId, int inSymmetricKeyType, unsigned int inKeyLength, const unsigned char *inKeyBytes, const unsigned char *inImportKeyId, unsigned int *outKeyLength, unsigned char **outKeyBytes);
     int (*symmetric_key_encrypt_decrypt)(KEYISO_KEY_CTX *keyCtx, int mode, const unsigned char *from, const unsigned int fromLen, unsigned char *to, unsigned int *toLen);

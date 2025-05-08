@@ -1083,7 +1083,6 @@ static int _handle_rsa_crypto_operation(
     int tlen,
     unsigned char *to,
     int padding,
-    int labelLen,
     const char *title)
 {
     int ret = -1;
@@ -1099,7 +1098,7 @@ static int _handle_rsa_crypto_operation(
         ret = _handle_non_p8_compatible_rsa_key(keyCtx, operation, flen, from, tlen, to, padding);
     } else {
         // The encrypted key is a p8 key. Same API call regardless if inProc or not         
-        ret = g_msgHandlerImplementation.rsa_private_encrypt_decrypt(keyCtx, operation, flen, from, tlen, to, padding, labelLen);
+        ret = g_msgHandlerImplementation.rsa_private_encrypt_decrypt(keyCtx, operation, flen, from, tlen, to, padding);
     }
 
     _log_result(keyCtx->correlationId, title, ret);
@@ -1115,7 +1114,7 @@ int KeyIso_CLIENT_rsa_private_encrypt(
     unsigned char *to,
     int padding)
 {
-    return _handle_rsa_crypto_operation(keyCtx, KEYISO_IPC_RSA_PRIV_ENCRYPT, flen, from, tlen, to, padding, 0, KEYISOP_RSA_ENCRYPT_TITLE);
+    return _handle_rsa_crypto_operation(keyCtx, KEYISO_IPC_RSA_PRIV_ENCRYPT, flen, from, tlen, to, padding, KEYISOP_RSA_ENCRYPT_TITLE);
 }
 
 int KeyIso_CLIENT_rsa_private_decrypt(
@@ -1124,10 +1123,9 @@ int KeyIso_CLIENT_rsa_private_decrypt(
     const unsigned char *from,
     int tlen,
     unsigned char *to,
-    int padding,
-    int labelLen)
+    int padding)
 {
-    return _handle_rsa_crypto_operation(keyCtx, KEYISO_IPC_RSA_PRIV_DECRYPT, flen, from, tlen, to, padding, labelLen, KEYISOP_RSA_DECRYPT_TITLE);
+    return _handle_rsa_crypto_operation(keyCtx, KEYISO_IPC_RSA_PRIV_DECRYPT, flen, from, tlen, to, padding, KEYISOP_RSA_DECRYPT_TITLE);
 }
 
 int KeyIso_CLIENT_rsa_sign(
@@ -1138,7 +1136,7 @@ int KeyIso_CLIENT_rsa_sign(
     unsigned char *to,
     int padding)
 {
-    return _handle_rsa_crypto_operation(keyCtx, KEYISO_IPC_RSA_SIGN, flen, from, tlen, to, padding, 0, KEYISOP_RSA_SIGN_TITLE);
+    return _handle_rsa_crypto_operation(keyCtx, KEYISO_IPC_RSA_SIGN, flen, from, tlen, to, padding, KEYISOP_RSA_SIGN_TITLE);
 }
 
 int KeyIso_CLIENT_pkey_rsa_sign(
@@ -1149,7 +1147,7 @@ int KeyIso_CLIENT_pkey_rsa_sign(
     unsigned char *to,
     int padding)
 {
-    return _handle_rsa_crypto_operation(keyCtx, KEYISO_IPC_PKEY_SIGN, flen, from, tlen, to, padding, 0, KEYISOP_PKEY_RSA_SIGN_TITLE);
+    return _handle_rsa_crypto_operation(keyCtx, KEYISO_IPC_PKEY_SIGN, flen, from, tlen, to, padding, KEYISOP_PKEY_RSA_SIGN_TITLE);
 }
 
 int KeyIso_CLIENT_ecdsa_sign(

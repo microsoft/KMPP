@@ -270,6 +270,11 @@ static int _split_symmetric_key_encrypted_input(
     unsigned char* dataBytes = NULL;
     unsigned int dataBytesLength = 0;
 
+    if (inDataBytesLength < KMPP_SYMMETRICKEY_BLOB_LEN) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "dataBytes split", "inDataBytesLength is smaller from meta data length");
+        return STATUS_FAILED;
+    }
+
     // Copy to the output versions HMAC and IVs according to the offset in the key bytes
     // encrypted data byte format - <version><SVN><HMAC result><IV><aes_256_cbc_ciphertext of the key>
     KeyIso_copy_data_src_offset(outVersion, inDataBytes, 1, &offset);
@@ -558,11 +563,6 @@ int KeyIso_symmetric_open_encrypted_data(
     unsigned char **outBytes)  // KeyIso_free()
 {
     const char *title = KEYISOP_IMPORT_SYMMETRIC_KEY_TITLE;
-    if (inBytes == NULL || inLength < KMPP_SYMMETRICKEY_BLOB_LEN) {
-        KEYISOP_trace_log_error(correlationId, 0, title, NULL, "Invalid input");
-        return STATUS_FAILED;
-    }
-
     unsigned char version;
     unsigned char securityVersion;
     unsigned char iv[KMPP_AES_BLOCK_SIZE];
@@ -630,10 +630,6 @@ int KeyIso_symmetric_open_encrypted_key(
     unsigned int *outKeyLength,
     unsigned char **outKeyBytes)
 {
-    if (inKeyBytes == NULL || inKeyLength < KMPP_SYMMETRICKEY_META_DATA_LEN + KMPP_SYMMETRICKEY_BLOB_LEN) {
-        return _cleanup_symmetric_open_encrypted_key(correlationId, STATUS_FAILED, NULL, "Invalid input");
-    }
-
     unsigned char encryptKey[KMPP_AES_256_KEY_SIZE];
     unsigned char hmacKey[KMPP_HMAC_SHA256_KEY_SIZE];
     unsigned char version;
