@@ -275,6 +275,8 @@ unsigned char* KeyIso_handle_msg_rsa_private_enc_dec_with_attached_key(const cha
     KeyIso_free(enKeySt);
     enKeySt = NULL;
 
+    KEYISOP_trace_log_para(rsaPrivEncDecInSt->headerSt.correlationId, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_SERVICE_TITLE, "Open after evict - RSA", "sender: %s, keyId: 0x%016llx", sender, keyId);
+
     if (keyId == 0) {
         res =  _rsa_private_enc_dec_failure(rsaPrivEncDecInSt->headerSt.correlationId, keyId, outLen, "_open_encrypted_key", "failed", STATUS_FAILED, command);
         KeyIso_SERVER_free_key(rsaPrivEncDecInSt->headerSt.correlationId, pkeyPtr);
@@ -293,7 +295,7 @@ unsigned char* KeyIso_handle_msg_rsa_private_enc_dec_with_attached_key(const cha
         return res;
     }
 
-    KeyIso_fill_rsa_enc_dec_param(rsaPrivEncDecInParams, rsaPrivEncDecInSt->decrypt, rsaPrivEncDecInSt->padding, rsaPrivEncDecInSt->tlen, rsaPrivEncDecInSt->fromBytesLen, rsaPrivEncDecInSt->labelLen, rsaPrivEncDecInSt->bytes);
+    KeyIso_fill_rsa_enc_dec_param(rsaPrivEncDecInParams, rsaPrivEncDecInSt->decrypt, rsaPrivEncDecInSt->padding, rsaPrivEncDecInSt->tlen, rsaPrivEncDecInSt->fromBytesLen, rsaPrivEncDecInSt->labelLen, rsaPrivEncDecInSt->bytes + encKeyDynamicSize);
     res = _handle_rsa_encrypt_dec(rsaPrivEncDecInSt->headerSt.correlationId, keyId, pkeyPtr, rsaPrivEncDecInParams, outLen, command);
     KeyIso_SERVER_free_key(rsaPrivEncDecInSt->headerSt.correlationId, pkeyPtr);
     KeyIso_free(rsaPrivEncDecInParams);
@@ -468,9 +470,11 @@ unsigned char*  KeyIso_handle_msg_ecdsa_sign_with_attached_key(
         KeyIso_free(enKeySt);
         return res;
     }
-    
     KeyIso_free(enKeySt);
     enKeySt = NULL;
+
+    KEYISOP_trace_log_para(ecSignInSt->headerSt.correlationId, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_SERVICE_TITLE, "Open after evict - ECC", "sender: %s, keyId: 0x%016llx", sender, keyId);
+    
     size_t dynamicSize = GET_DYNAMIC_STRUCT_SIZE(KEYISO_ECDSA_SIGN_IN_PARAMS_ST, ecSignInSt->digestLen);
     KEYISO_ECDSA_SIGN_IN_PARAMS_ST* ecSignInParams = (KEYISO_ECDSA_SIGN_IN_PARAMS_ST*) KeyIso_zalloc(dynamicSize);
     if (ecSignInParams == NULL) {

@@ -1,0 +1,13 @@
+# The KMPP default provider must be registered with libcrypto.
+# Unlike the KMPP provider, it is not intended to be loaded explicitly
+# if configured as the default provider.
+# Similar to the KMPP provider, the provider can be disabled
+# by commenting out or removing "activate = 1"
+# or by following "enabled by default" definitions.
+#
+# The value assigned does not matter; the provider will be
+# activated as long as the "activate" key is present.
+
+[kmppprovider_dflt_sect]
+activate = 1
+identity = kmppprovider_dflt

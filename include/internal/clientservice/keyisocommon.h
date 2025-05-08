@@ -33,6 +33,9 @@ extern "C" {
 #define KEYISO_ADD_OVERFLOW(a, b, res) __builtin_add_overflow(a, b, res)
 #define KEYISO_MUL_OVERFLOW(a, b, res) __builtin_mul_overflow(a, b, res)
 
+// Includes NULL terminator character
+#define KEYISOP_BASE64_ENCODE_LENGTH(inLength) ((((inLength + 3 - 1) / 3) * 4) + 1)
+
 #define STATUS_FAILED                      0
 #define STATUS_OK                          1
 #define STATUS_NOT_FOUND                   2
@@ -125,6 +128,7 @@ typedef enum
 #define KEYISO_MAX_KEY_ID_LEN KEYISOP_BASE64_ENCODE_LENGTH(KMPP_MAX_MESSAGE_SIZE) 
 
 #define KEYISO_SYMCRYPT_RSA_SUPPORTED_NUM_OF_PRIMES      2
+#define KEYISO_SYMCRYPT_RSA_MIN_BITSIZE_MODULUS          256  // based on SYMCRYPT_RSAKEY_MIN_BITSIZE_MODULUS
 
 
 // SymCrypt & OpenSSL params
@@ -173,6 +177,12 @@ typedef enum
 # define KMPP_RSA_PSS_SALTLEN_MAX_SIGN    -2
 /* Maximum salt length for the digest, relevant from OpenSSL 3.1 */
 #define KMPP_RSA_PSS_SALTLEN_AUTO_DIGEST_MAX             -4 
+
+#define VERSION_CHAR                  'n' // The first byte of the keyId is 'n' for new versions and 0 for legacy code
+#define EXTRA_DATA_DELIMITER          ':'
+#define MIN_EXTRA_DATA_LENGTH         sizeof(KEYISO_ENCRYPTION_EXTRA_DATA_HEADER_ST)
+#define MAX_EXTRA_DATA_LENGTH         sizeof(KEYISO_KMPP_SERVICE_EXTRA_DATA_ST) + KEYISO_SECRET_SALT_STR_BASE64_LEN
+#define MAX_EXTRA_DATA_BASE64_LENGTH  KEYISOP_BASE64_ENCODE_LENGTH(MAX_EXTRA_DATA_LENGTH)
 
 // Log provider defines
 typedef enum
@@ -333,6 +343,14 @@ struct keyiso_rsa_private_encrypt_decrypt_input_params_st {
 *    Functions
 */
 
+// Implemented in keyisoutils.c
+int KeyIso_get_salt_from_keyid(
+    const uuid_t correlationId,
+    KeyIsoSolutionType expectedSolutionType,
+    const char *keyId, // Expects new version keyid format:  'n' <Base64 ExtraDataBuffer> ':' <Base64 PFX>
+    unsigned int encodedExtraDataLength,
+    char **outSalt);
+
 // Implemented in keyisolog.c
 void KeyIso_set_log_provider(
     KeyisoLogProvider provider);
@@ -423,6 +441,21 @@ int KeyIso_pkcs12_parse(
     X509 **outCert,
     STACK_OF(X509) **outCa);
 
+// Helper function for PKCS#12 parsing, 
+// extracting PKCS#8 encrypted private key
+// returns 1 for success and zero if an error occurred.
+int KeyIso_pkcs12_parse_p8(
+    const uuid_t correlationId,
+    int inPfxLength,
+    const unsigned char *inPfxBytes,
+    X509_SIG **outP8,
+    X509 **outCert,
+    STACK_OF(X509) **outCa);
+
+int KeyIso_create_enckey_from_p8(
+    const X509_SIG *inP8,
+    KEYISO_ENCRYPTED_PRIV_KEY_ST **outEncKey);
+
 // Helper function for Key Generation
 // OpenSSL Conf string loading.
 int KeyIso_conf_load(
@@ -477,9 +510,14 @@ int KeyIso_conf_sign(
     X509 *cert,
     EVP_PKEY *pkey);
 
+
 void KeyIsoP_X509_pubkey_sha256_hex_hash(
 	X509* x,
 	char* hexHash);
+
+void KeyIso_pkey_sha256_hex_hash(
+    EVP_PKEY* pkey,
+    char* hexHash);
 
 // Converting received public key to EVP_PKEY
 int KeyIso_get_ec_evp_pkey(
@@ -497,6 +535,14 @@ int KeyIso_get_ec_evp_pub_key(
     uint32_t yLen,
     EC_KEY** outEcKey, 
     EC_GROUP** outEcGroup);
+
+// Implemented in keyisopbe.c
+const void* KeyIso_pbe_get_algor_param_asn1(
+    const char* title,
+    const X509_ALGOR *algor,
+    const char* expectedAlgOid);
+
+bool KeyIso_is_equal_oid(const ASN1_OBJECT *oid, const char* expectedAlgOid);
 
 #endif //KMPP_OPENSSL_SUPPORT
 

@@ -7,8 +7,6 @@
 
 #include "keyisoservicekey.h"
 
-extern uint32_t g_keyCacheCapacity;
-
 // Assist functions table definition 
 typedef struct key_list_assist_functions_table_st KEY_LIST_ASSIST_FUNCTIONS_TABLE_ST;
 struct key_list_assist_functions_table_st {
@@ -16,9 +14,15 @@ struct key_list_assist_functions_table_st {
     void (*readUnlock)(void);
     void (*writeLock)(void);
     void (*writeUnlock)(void);
+    void (*initLocks)(void);
+    void (*clearLocks)(void);
     int (*compareSender)(const char*, const char*);
 };
-// TOD: Rename LIST -> CACHE
+
+#ifdef  __cplusplus
+extern "C" {
+#endif
+
 // For success, does KeyIso_SERVER_key_up_ref() of pkey
 uint64_t KeyIso_add_key_to_list(
     const uuid_t correlationId,
@@ -38,3 +42,13 @@ int KeyIso_remove_key_from_list(
 
 void KeyIso_remove_sender_keys_from_list(
     const char *senderName);
+
+void KeyIso_initialize_key_list(
+    const uuid_t correlationId,
+    uint32_t capacity);
+
+void KeyIso_clear_key_list(void);
+
+#ifdef  __cplusplus
+}
+#endif

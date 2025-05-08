@@ -76,3 +76,28 @@ bool KeyIso_check_default(const char* name)
 
 	return false;
 }
+
+int KeyIso_get_rsa_params(
+    const EVP_PKEY *pkey, 
+    BIGNUM **rsa_n,  // Modulus (public)
+    BIGNUM **rsa_e,  // Exponent (public)
+    BIGNUM **rsa_p,  // Prime1 (private)
+    BIGNUM **rsa_q)  // Prime2 (private)
+{
+    if (pkey == NULL) {
+        return STATUS_FAILED;
+    }
+
+    const RSA *rsa = EVP_PKEY_get0_RSA((EVP_PKEY *)pkey); // get0 doesn't up_ref
+    if (rsa == NULL) {
+        return STATUS_FAILED;
+    } 
+    RSA_get0_key(rsa, (const BIGNUM **)rsa_n, (const BIGNUM **)rsa_e, NULL); // should not be freed by the caller
+    if (*rsa_n == NULL || *rsa_e == NULL) {
+        return STATUS_FAILED;
+    }
+
+    RSA_get0_factors(rsa, (const BIGNUM **)rsa_p, (const BIGNUM **)rsa_q);
+
+    return STATUS_OK;
+}

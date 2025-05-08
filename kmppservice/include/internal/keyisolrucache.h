@@ -12,6 +12,7 @@ extern "C" {
 
 
 typedef void (*ValueFreeFunction)(void *);
+typedef void (*ValueRefCountFunction)(void *);
 
 typedef struct KMPP_cache_entry_st KMPP_CACHE_ENTRY_ST;
 
@@ -25,16 +26,17 @@ struct KMPP_cache_entry_st {
 
 typedef struct KMPP_cache_st KMPP_LRU_CACHE;
 struct KMPP_cache_st {
-    KMPP_CACHE_ENTRY_ST **table;
+    KMPP_CACHE_ENTRY_ST** table;
     KMPP_CACHE_ENTRY_ST* head;
     KMPP_CACHE_ENTRY_ST* tail;
     ValueFreeFunction valueFreeFunc; // Will be called on the value when it is removed so the ref count can be decreased or the memory freed if the stored value is a dynamically allocated memory
+    ValueRefCountFunction valueRefCountIncrementFunc; // Will be called on the value when it is accessed so the ref count can be increased
     uint32_t capacity;
     uint32_t size;
 };
 
 // Create a cache according to the given capacity
-KMPP_LRU_CACHE *KeyIso_create_cache(uint32_t capacity, ValueFreeFunction valueFreeFunc);
+KMPP_LRU_CACHE *KeyIso_create_cache(uint32_t capacity, ValueFreeFunction valueFreeFunc, ValueRefCountFunction valueRefCountIncrementFunc);
 
 // Returns the unique hash key or 0 for error
 uint64_t KeyIso_cache_put(KMPP_LRU_CACHE *cache, uint32_t random, void* value, const char *tag);
@@ -46,8 +48,6 @@ void KeyIso_cache_remove(KMPP_LRU_CACHE *cache, uint64_t uniqueHashKey, const ch
 
 // Free the cache
 void KeyIso_cache_free(KMPP_LRU_CACHE *cache);
-
-void KeyIso_cache_print(KMPP_LRU_CACHE *cache);
 
 // Delete all elements that have the same tag
 void KeyIso_cache_remove_tag(KMPP_LRU_CACHE *cache, const char *tag);

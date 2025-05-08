@@ -203,7 +203,6 @@ void KeyIso_add_gdbus_sender_to_list(
         _on_name_vanished,
         NULL,                               // user_data
         NULL);                              // user_data_free_func
-
     G_LOCK(KMPP_GDBUS_senderLock);
     // Note, must explicitly reference _senderList[]. There could be a realloc
     // outside of the lock
@@ -213,8 +212,8 @@ void KeyIso_add_gdbus_sender_to_list(
     } else {
         KMPP_GDBUS_senderList[addSenderIndex].watcherId = watcherId;
     }
-    G_UNLOCK(KMPP_GDBUS_senderLock);
 
+    G_UNLOCK(KMPP_GDBUS_senderLock);
     if (watcherId == 0) {
         loc = "g_bus_watch_name_on_connection";
         goto err;
@@ -270,12 +269,14 @@ static void KeyIso_keyCache_write_unlock()
     g_rw_lock_writer_unlock(&KMPP_keyCacheRWLock);
 }
 
-const KEY_LIST_ASSIST_FUNCTIONS_TABLE_ST GDBusKeyListFnctImp = {    
+const KEY_LIST_ASSIST_FUNCTIONS_TABLE_ST GDBusKeyListFnctImp = {  
     .readLock = KeyIso_keyCache_read_lock,
     .readUnlock = KeyIso_keyCache_read_unlock,
     .writeLock = KeyIso_keyCache_write_lock,
     .writeUnlock = KeyIso_keyCache_write_unlock,
-    .compareSender = KeyIso_gdbus_compare_sender    
+    .initLocks = KeyIso_initialize_locks,
+    .clearLocks = KeyIso_clear_locks,
+    .compareSender = KeyIso_gdbus_compare_sender   
 };
 
 const KEY_LIST_ASSIST_FUNCTIONS_TABLE_ST keyListFunctionTable = GDBusKeyListFnctImp;

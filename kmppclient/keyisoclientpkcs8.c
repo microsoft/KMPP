@@ -30,9 +30,14 @@
 #include "keyisoserviceapi.h"
 #include "keyisoservicekey.h"
 #include "keyisoserviceapiossl.h"
- 
+
 extern CLIENT_MSG_HANDLER_FUNCTIONS_TABLE_ST g_msgHandlerImplementation;
-extern KEYISO_CLIENT_CONFIG_ST g_config; 
+extern KEYISO_CLIENT_CONFIG_ST g_config;
+
+/*
+ * Configuration string for creating an X509 certificate containing the public
+ * key and signing it with a dummy key for keyId formatting before encoding it
+ */
 
 static int _client_common_open(
     const uuid_t correlationId,
@@ -240,7 +245,7 @@ static int _get_rsa_param(
     return STATUS_OK;
 }
 
-static int _create_encrypted_pfx_bytes(
+int KeyIso_create_encrypted_pfx_bytes(
     const uuid_t correlationId,
     X509_SIG *inP8,
     X509 *inCert,
@@ -397,6 +402,22 @@ int KeyIso_CLIENT_import_private_key(
 }
 
 
+int KeyIso_CLIENT_generate_rsa_key_pair(
+    const uuid_t correlationId,
+    unsigned int rsaBits,
+    uint8_t keyUsage,
+    uint64_t pubExp64,
+    uint32_t nPubExp,
+    EVP_PKEY **pubEpkey,
+    X509_SIG **encryptedPkey,
+    char **salt)
+{
+	// These parameters are currently not used, but should be supported in provider.
+    (void)pubExp64;
+    (void) nPubExp;
+    return g_msgHandlerImplementation.generate_rsa_key_pair(correlationId, rsaBits, keyUsage, pubEpkey, encryptedPkey, salt);
+}
+
 static int _cleanup_generate_rsa_key_pair(
     int ret,
     const uuid_t correlationId,
@@ -418,7 +439,7 @@ static int _cleanup_generate_rsa_key_pair(
 #define _CLEANUP_GENERATE_RSA_KEY_PAIR(ret, loc, message) \
     _cleanup_generate_rsa_key_pair(ret, correlationId, loc, message, salt, pubEpkey, encryptedPkey)
 
-int KeyIso_CLIENT_generate_rsa_key_pair( 
+int KeyIso_CLIENT_generate_rsa_key_pair_conf( 
     const uuid_t correlationId,
     int keyisoFlags, 
     const CONF *conf,
@@ -458,8 +479,8 @@ int KeyIso_CLIENT_generate_rsa_key_pair(
         return _CLEANUP_GENERATE_RSA_KEY_PAIR(STATUS_FAILED, "keyUsage", "Failed");
     }
     
-    ret = g_msgHandlerImplementation.generate_rsa_key_pair(correlationId, rsaBits, keyUsage, &pubEpkey, &encryptedPkey, &salt);
-          
+
+    ret = KeyIso_CLIENT_generate_rsa_key_pair(correlationId, rsaBits, keyUsage, 0, 0, &pubEpkey, &encryptedPkey, &salt);
     if (ret != STATUS_OK) {
         return _CLEANUP_GENERATE_RSA_KEY_PAIR(STATUS_FAILED, "Generate key pair", "Failed");
     }
@@ -617,7 +638,7 @@ int KeyIso_CLIENT_import_private_key_from_pfx(
         correlationId = randId;
     }
 
-    KEYISOP_trace_log_para(correlationId, 0, title, "Start", "flags: 0x%x, solutionType: %d, isDefaultConfig: %d", keyisoFlags, g_config.solutionType, g_config.isDefault);
+    KEYISOP_trace_log_para(correlationId, 0, title, "Start", "flags: 0x%x, solutionType: %d, isDefaultConfig: %d", keyisoFlags, g_config.solutionType, g_config.isDefaultSolutionType);
 
     ERR_clear_error();
 
@@ -674,9 +695,12 @@ int KeyIso_CLIENT_import_private_key_from_pfx(
         return _cleanup_import_pfx_private_key(ret, "KeyIso_CLIENT_import_private_key", "Failed", sha256HexHash, inPfxPkey, inPfxCert, inPfxCa, outPfxCa, p8);
 
     // creating encrypted pfx
-    ret = _create_encrypted_pfx_bytes(correlationId, p8, inPfxCert, inPfxCa, outPfxLength, outPfxBytes);
-    if (ret != STATUS_OK)
-        return _cleanup_import_pfx_private_key(ret, "_create_encrypted_pfx_bytes", "Failed", sha256HexHash, inPfxPkey, inPfxCert, inPfxCa, outPfxCa, p8);
+    ret = KeyIso_create_encrypted_pfx_bytes(correlationId, p8, inPfxCert, inPfxCa, outPfxLength, outPfxBytes);
+    if (ret != STATUS_OK) {
+        KeyIso_clear_free_string(salt);
+        salt = NULL;
+        return _cleanup_import_pfx_private_key(ret, "KeyIso_create_encrypted_pfx_bytes", "Failed", sha256HexHash, inPfxPkey, inPfxCert, inPfxCa, outPfxCa, p8);
+    }
 
     // Print metric of the imported key.
     char usageStr[64];
@@ -728,7 +752,7 @@ int _create_self_sign_key_generation(
     EC_KEY *generatedEccPubKey = NULL;
 
     if (keyType == EVP_PKEY_RSA) {
-        if (KeyIso_CLIENT_generate_rsa_key_pair(correlationId, keyisoFlags, conf, &generatedPubKey, generatedEncryptedPkey, pfxSalt) != STATUS_OK) {
+        if (KeyIso_CLIENT_generate_rsa_key_pair_conf(correlationId, keyisoFlags, conf, &generatedPubKey, generatedEncryptedPkey, pfxSalt) != STATUS_OK) {
             return _cleanup_self_sign_key_generation(correlationId, STATUS_FAILED, "Failed to generate rsa key pair", generatedPubKey, generatedEccGroup, generatedEccPubKey);
         }
 
@@ -783,6 +807,40 @@ int _create_self_sign_cert_configuration(
     return STATUS_OK;
 }
 
+
+/* Sign the certificate with an ephemeral dummy key (cert signing is required by the keyId format).
+ * The dummy key is used only for signing the certificate and is not generated 
+ * via the KMPP provider to prevent an infinite loop during key generation via the provider.
+ * Therefore, avoid using X509_sign, as key generation via the provider will use the KMPP provider,
+ * since the public key inside the certificate is associated with it.
+ * This results in an error since the signing key was generated and associated with the OpenSSL default provider.
+ */
+static int _sign_cert(const uuid_t correlationId, const CONF* conf, X509 *cert, EVP_PKEY *pKey) 
+{
+    if(cert == NULL || pKey == NULL) {
+		return STATUS_FAILED;
+	}
+
+#ifdef KMPP_OPENSSL_3
+/*
+* Similar to "KeyIso_cert_sign", once ECC support is added to the providers this ifdef will be removed.
+* In addition, to ensure consistency between the engine and provider, the function name will be changed
+* to KeyIso_conf_sign with the additional arguments.
+*/
+    if (KeyIso_conf_cert_sign_prov(correlationId, conf, cert, pKey, NULL, "provider=default") != STATUS_OK) {
+        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_CREATE_SELF_SIGN_TITLE, NULL, "Failed to sign cert with provider");
+        return STATUS_FAILED;
+    }
+#else 
+    if (X509_sign(cert, pKey, EVP_sha256()) <= 0) {
+		KEYISOP_trace_log_openssl_error(NULL, 0, KEYISOP_CREATE_SELF_SIGN_TITLE, "X509_sign");
+		return STATUS_FAILED;
+	}
+#endif
+
+	return STATUS_OK;
+}
+
 int _create_self_sign_dummy_sign(
     const uuid_t correlationId,
     const int keyType,
@@ -791,9 +849,9 @@ int _create_self_sign_dummy_sign(
 {
     const char *title = KEYISOP_CREATE_SELF_SIGN_TITLE;
     EVP_PKEY *dummyPkey = NULL;
-    int status = STATUS_FAILED;
+    int status = STATUS_OK;
 
-    if (keyType == EVP_PKEY_RSA) {
+    if (keyType == EVP_PKEY_RSA || keyType == EVP_PKEY_RSA_PSS) {
         dummyPkey = KeyIso_conf_generate_rsa(correlationId, conf);
     } else if (keyType == EVP_PKEY_EC) {
         dummyPkey = KeyIso_conf_generate_ecc(correlationId, conf);
@@ -804,11 +862,11 @@ int _create_self_sign_dummy_sign(
         return STATUS_FAILED;
     }
 
-    if (X509_sign(cert, dummyPkey, EVP_sha256()) <= 0) {
-        KEYISOP_trace_log_openssl_error(correlationId, 0, title, "X509_sign");
-    } else {
-        status = STATUS_OK;
-    }
+	// Sign the certificate with the dummy key
+	if (_sign_cert(correlationId, conf, cert, dummyPkey) != STATUS_OK) {
+		KEYISOP_trace_log_error(correlationId, 0, title, NULL, "Failed to sign cert with dummy key");
+		status = STATUS_FAILED;
+	}
 
     EVP_PKEY_free(dummyPkey);
     return status;
@@ -825,7 +883,7 @@ int _create_self_sign_key_handle(
     int encryptedPfxLength = 0;
     unsigned char *encryptedPfxBytes = NULL;
 
-    if (_create_encrypted_pfx_bytes(correlationId, generatedEncryptedPkey, cert, NULL, &encryptedPfxLength, &encryptedPfxBytes) != STATUS_OK) {
+    if (KeyIso_create_encrypted_pfx_bytes(correlationId, generatedEncryptedPkey, cert, NULL, &encryptedPfxLength, &encryptedPfxBytes) != STATUS_OK) {
         KeyIso_free(encryptedPfxBytes);
         KEYISOP_trace_log_error(correlationId, 0, title, NULL, "creating encrypted PFX failed");
         return STATUS_FAILED;
@@ -907,7 +965,7 @@ int KeyIso_CLIENT_create_self_sign_pfx_p8(
     *pfxSalt = NULL;
     char sha256HexHash[SHA256_DIGEST_LENGTH * 2 + 1] = "\0";
 
-    KEYISOP_trace_log_para(correlationId, 0, title, "Start", "flags: 0x%x, solutionType: %d, isDefaultConfig: %d", keyisoFlags, g_config.solutionType, g_config.isDefault);
+    KEYISOP_trace_log_para(correlationId, 0, title, "Start", "flags: 0x%x, solutionType: %d, isDefaultConfig: %d", keyisoFlags, g_config.solutionType, g_config.isDefaultSolutionType);
 
     ERR_clear_error();
 
@@ -957,7 +1015,7 @@ int KeyIso_CLIENT_create_self_sign_pfx_p8(
     }
 
     // Create the final pfx with the signed cert
-    if (_create_encrypted_pfx_bytes(correlationId, pkcs8Signature, cert, NULL, pfxLength, pfxBytes) != STATUS_OK) {
+    if (KeyIso_create_encrypted_pfx_bytes(correlationId, pkcs8Signature, cert, NULL, pfxLength, pfxBytes) != STATUS_OK) {
         return _cleanup_create_self_sign_pfx_p8(correlationId, STATUS_FAILED, "creating encrypted PFX failed", cert, encryptedKeyId, conf);
     }
 
@@ -968,6 +1026,67 @@ int KeyIso_CLIENT_create_self_sign_pfx_p8(
     KEYISOP_trace_log(correlationId, 0, title, "Complete");
     return _cleanup_create_self_sign_pfx_p8(correlationId, STATUS_OK, NULL, cert, encryptedKeyId, conf);
 }
+
+
+static int _cleanup_create_X509_from_pubkey(
+    int ret,
+    const char *errStr,
+    const uuid_t correlationId,
+    X509 *cert)
+{
+    if (ret != STATUS_OK) {
+        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_CREATE_SELF_SIGN_TITLE, NULL, errStr);
+
+		if (cert) {
+			X509_free(cert);
+		}
+    }
+
+    return ret;
+}
+
+#define _CLEANUP_CREATE_X509_FROM_PUBKEY(ret, errStr) \
+    _cleanup_create_X509_from_pubkey(ret, errStr, correlationId, *cert)
+
+
+// Create an X509 certificate using a public key and signed by a dummy key
+int KeyIso_CLIENT_create_X509_from_pubkey(
+    const uuid_t correlationId,
+    int keyType,
+    EVP_PKEY *pubKey,
+    X509 **cert,
+    CONF *conf)
+{
+    if (pubKey == NULL || cert == NULL) {
+        return _CLEANUP_CREATE_X509_FROM_PUBKEY(STATUS_FAILED, "Invalid parameters");
+    }
+
+    if (conf == NULL) {
+        return _CLEANUP_CREATE_X509_FROM_PUBKEY(STATUS_FAILED, "Invalid configuration");
+    }
+
+    *cert = X509_new();
+    if (*cert == NULL) {
+        return _CLEANUP_CREATE_X509_FROM_PUBKEY(STATUS_FAILED, "Failed to create new X509 certificate");
+    }
+
+    // Set the public key in the certificate
+    if (X509_set_pubkey(*cert, pubKey) != STATUS_OK) {
+        return _CLEANUP_CREATE_X509_FROM_PUBKEY(STATUS_FAILED, "Failed to set public key in X509 certificate");
+    }
+
+    // Configure the certificate using the CONF object
+    if (_create_self_sign_cert_configuration(correlationId, conf, *cert) != STATUS_OK) {
+        return _CLEANUP_CREATE_X509_FROM_PUBKEY(STATUS_FAILED, "Failed to configure certificate");
+    }
+
+    if (_create_self_sign_dummy_sign(correlationId, keyType, conf, *cert) != STATUS_OK) {
+        return _CLEANUP_CREATE_X509_FROM_PUBKEY(STATUS_FAILED, "Dummy key sign failed");
+    }
+
+    return _CLEANUP_CREATE_X509_FROM_PUBKEY(STATUS_OK, "");
+}
+
 
 static int _cleanup_replace_pfx_certs_p8(
     int ret,
@@ -1041,7 +1160,7 @@ int KeyIso_replace_pfx_certs_p8(
     }
 
     // creating encrypted pfx
-    ret = _create_encrypted_pfx_bytes(correlationId, p8, pemCert, pemCa, outPfxLength, outPfxBytes);
+    ret = KeyIso_create_encrypted_pfx_bytes(correlationId, p8, pemCert, pemCa, outPfxLength, outPfxBytes);
     if (ret != STATUS_OK) {
         KEYISOP_trace_log(correlationId, 0, title, "creating encrypted PFX failed");
         return _cleanup_replace_pfx_certs_p8(ret, pfxPubKey, pemPubKey, pemCert, pemCa, p8);

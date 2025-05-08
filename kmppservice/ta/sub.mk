@@ -14,11 +14,16 @@ global-incdirs-y += $(MSCRYPT_INC_DIR)
 global-incdirs-y += $(MSCRYPT_INC_DIR)/internal/clientservice
 global-incdirs-y += $(KMPP_SERVICE_INC_DIR)
 
-# Add the Symcrypt include directory to the include path
-SYMCRYPT_DIR = $(MSCRYPT_DIR)/external/SymCrypt
-global-incdirs-y += $(SYMCRYPT_DIR)/inc/
 
-# Link Symcrypt lib to kmpp TA compilation
+#Path to Symcrypt (submodule or artifact feed). The ?= allows a higher level recipe to override
+SYMCRYPT_DIR ?= $(MSCRYPT_DIR)/external/SymCrypt
+
+# Add the Symcrypt include directory to the include path
+incdirs_ext-y += $(SYMCRYPT_DIR)/inc/
+
+# Link Symcrypt lib to kmpp TA compilation (path is for Symcrypt artifact feed)
+libdirs += $(SYMCRYPT_DIR)/lib
+# TODO... temporary to maintain compatibility compiling Symcrypt as a submodule
 libdirs += $(SYMCRYPT_DIR)/bin/lib
 
 # Typically, the linker only includes the needed object files from the library to resolve undefined references,

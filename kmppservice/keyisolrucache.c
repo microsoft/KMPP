@@ -2,14 +2,22 @@
  * Copyright (c) Microsoft Corporation.
  * Licensed under the MIT License
  */
+
+ #include <glib.h> 
 #include <stdio.h>
 #include <string.h>
-#include "keyisomemory.h"
-#include "keyisolog.h"
 #include "keyisocommon.h"
 #include "keyisolrucache.h"
+#include "keyisolog.h"
+#include "keyisomemory.h"
 
 #define KEYISO_MAX_TAG_LEN 256 
+// Lock abstraction for the cache
+G_LOCK_DEFINE_STATIC(KMPP_CACHE_LOCK);
+
+#define LOCK()  G_LOCK(KMPP_CACHE_LOCK);
+#define UNLOCK() G_UNLOCK(KMPP_CACHE_LOCK);
+
 
 // Hash function - returns the index in the cache for the given uniqueHashKey
 static uint32_t _hash(uint64_t uniqueHashKey)
@@ -18,19 +26,25 @@ static uint32_t _hash(uint64_t uniqueHashKey)
 }
 
 // Create a cache according to the given capacity
-KMPP_LRU_CACHE *KeyIso_create_cache(uint32_t capacity, ValueFreeFunction valueFreeFunc)
+KMPP_LRU_CACHE *KeyIso_create_cache(uint32_t capacity, ValueFreeFunction valueFreeFunc, ValueRefCountFunction valueRefCountIncrementFunc)
 {
     const char *title = KEYISOP_CACHE_TITLE;
-    if (capacity <= 0) {
+    if (capacity == 0) {
         KEYISOP_trace_log_error(NULL, 0, title, "Failed to create the cache", "Invalid capacity");
+        return NULL;
+    }
+    
+    if (capacity > UINT32_MAX / sizeof(KMPP_CACHE_ENTRY_ST *)) {
+        KEYISOP_trace_log_error_para(NULL, 0, title, "Failed to create the cache", "Invalid capacity", "capacity: %u", capacity);
         return NULL;
     }
     KMPP_LRU_CACHE *cache = KeyIso_zalloc(sizeof(KMPP_LRU_CACHE));
     if (cache == NULL) {
+        KEYISOP_trace_log_error(NULL, 0, title, "Failed to create the cache", "KeyIso_zalloc failed");
         return NULL;
     }
     cache->capacity = capacity;
-    cache->table = KeyIso_zalloc(capacity*sizeof(KMPP_CACHE_ENTRY_ST *));
+    cache->table = KeyIso_zalloc(capacity * sizeof(KMPP_CACHE_ENTRY_ST *));
     if (cache->table == NULL) {
         KeyIso_free(cache);
         return NULL;
@@ -39,6 +53,7 @@ KMPP_LRU_CACHE *KeyIso_create_cache(uint32_t capacity, ValueFreeFunction valueFr
     cache->tail = NULL;
     cache->size = 0;
     cache->valueFreeFunc = valueFreeFunc;
+    cache->valueRefCountIncrementFunc = valueRefCountIncrementFunc;
     KEYISOP_trace_log_para(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, title, "Cache created", "capacity: %u", capacity);
     return cache;
 }
@@ -90,7 +105,7 @@ static void _cache_move_to_front(KMPP_LRU_CACHE *cache, KMPP_CACHE_ENTRY_ST *ent
     }
     // The cache head is updated to the new entry
     cache->head = entry;
-    if (!cache->tail) {
+    if (cache->tail == NULL) {
         // If the tail is NULL, this is the first entry in the cache, so its also the tail
         cache->tail = entry;
     }
@@ -116,7 +131,7 @@ static void _cache_evict(KMPP_LRU_CACHE *cache, uint32_t *evictedIndex)
     const char *title = KEYISOP_CACHE_TITLE;
     KMPP_CACHE_ENTRY_ST *tail = cache->tail;
     if (tail == NULL) {
-        KEYISOP_trace_log_error(NULL, 0, title, "Failed to evict", "Tail is NULL");
+        KEYISOP_trace_log_error_para(NULL, 0, title, "Failed to evict", "Tail is NULL", "cache size: %u", cache->size);
         return;
     }
 
@@ -136,10 +151,14 @@ static void _cache_evict(KMPP_LRU_CACHE *cache, uint32_t *evictedIndex)
     if (cache->valueFreeFunc) {
         // Callback to free the value
         cache->valueFreeFunc(tail->value);
+        // TEST log print 
+        KEYISOP_trace_log_para(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, title, "Evicted", "value freed");
         tail->value = NULL;
+        KEYISOP_trace_log_para(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, title, "Evicted", "value set to NULL");
     }
     _free_elem(&tail);
     cache->size -= 1;
+    KEYISOP_trace_log_para(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, title, "Evicted", "new cache size: %u", cache->size);
     *evictedIndex = index;
 }
 
@@ -149,15 +168,18 @@ uint64_t KeyIso_cache_put(KMPP_LRU_CACHE *cache, uint32_t random, void* value, c
     const char *title = KEYISOP_CACHE_TITLE;
     uint64_t uniqueHashKey = 0;
     uint32_t index = 0;
+
+    if (random == 0 || value == NULL) {
+        KEYISOP_trace_log_error(NULL, 0, KEYISOP_CACHE_TITLE, "Failed to add element", "Random value cant be 0");
+        return 0;
+    }
+    
     if (cache == NULL) {
         KEYISOP_trace_log_error(NULL, 0, KEYISOP_CACHE_TITLE, "Put to cache failed", "Cache is NULL");
         return 0;
     } 
-
-    if (random == 0) {
-        KEYISOP_trace_log_error(NULL, 0, KEYISOP_CACHE_TITLE, "Failed to add element", "Random value cant be 0");
-        return 0;
-    }
+    
+    LOCK();
     if (cache->size >= cache->capacity) {
         // Evict the LRU entry and get the freed slot index
         _cache_evict(cache, &index);
@@ -167,13 +189,17 @@ uint64_t KeyIso_cache_put(KMPP_LRU_CACHE *cache, uint32_t random, void* value, c
     }
 
     if (index >= cache->capacity) {
+        UNLOCK();
         KEYISOP_trace_log_error( NULL, 0, KEYISOP_CACHE_TITLE, "Failed to add element", "Invalid index");
         return 0;
     }
 
+    // Generate uniqueHashKey by combining index and random value
+    // The lower 32 bits are the index, and the upper 32 bits are the random value
     uniqueHashKey = (uint64_t) index | (((uint64_t) random) << 32);
     KMPP_CACHE_ENTRY_ST *newEntry = KeyIso_zalloc(sizeof(*newEntry));
     if (!newEntry) {
+        UNLOCK();
         return 0;
     }
     newEntry->hashKey = uniqueHashKey;
@@ -183,14 +209,27 @@ uint64_t KeyIso_cache_put(KMPP_LRU_CACHE *cache, uint32_t random, void* value, c
     newEntry->tag = KeyIso_strndup(tag, KEYISO_MAX_TAG_LEN);
     if (newEntry->tag == NULL) {
         _free_elem(&newEntry);
+        UNLOCK();
         KEYISOP_trace_log_error( NULL, 0, KEYISOP_CACHE_TITLE, "Failed to create the cache entry", "Failed to strdup the tag");
         return 0;
     }
+    
+    // Ref count increment callback
+    if (cache->valueRefCountIncrementFunc) {
+        cache->valueRefCountIncrementFunc(value);
+    }
 
+    // Add the new entry both to the table and to the list
     cache->table[index] = newEntry;
+    if (cache->size == 0) {
+        // First entry in the cache
+        cache->head = newEntry;
+        cache->tail = newEntry;
+    }
     _cache_move_to_front(cache, newEntry);
     cache->size += 1;
-    KEYISOP_trace_log_para(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, title, "Added", "index: %u,uniqueHashKey: 0x%016llx", index, uniqueHashKey);
+    KEYISOP_trace_log_para(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, title, "Added", "index: %u,uniqueHashKey: 0x%016llx, new cache size: %u", index, uniqueHashKey, cache->size);
+    UNLOCK();
     return uniqueHashKey;
 }
 
@@ -198,21 +237,36 @@ uint64_t KeyIso_cache_put(KMPP_LRU_CACHE *cache, uint32_t random, void* value, c
 void* KeyIso_cache_get(KMPP_LRU_CACHE *cache, uint64_t uniqueHashKey, const char *tag)
 {
     const char *title = KEYISOP_CACHE_TITLE;
-    uint32_t index = _hash(uniqueHashKey);
     if (cache == NULL) {
         KEYISOP_trace_log_error( NULL, 0, KEYISOP_CACHE_TITLE, "Get from cache failed", "Cache is NULL");
         return NULL;
     } 
+
+    if (tag == NULL) {
+        KEYISOP_trace_log_error( NULL, 0, KEYISOP_CACHE_TITLE, "Get from cache failed", "Invalid tag, cant be NULL");
+        return NULL;
+    }
+
+    LOCK();
+    uint32_t index = _hash(uniqueHashKey);
     KMPP_CACHE_ENTRY_ST *entry = cache->table[index];
     // We expect all the 64 bits to match(both the 32 bits index that are returned by the hash function and 32 bits rand
     // otherwise this is not the same entry
-    if (!entry || entry->hashKey != uniqueHashKey || strcmp(entry->tag, tag) != 0 ) { 
+    if (!entry || entry->hashKey != uniqueHashKey || strncmp(entry->tag, tag, KEYISO_MAX_TAG_LEN) != 0 ) { 
         // Not an error, the value might be evicted by the time we try to get it, printing a debug message
         KEYISOP_trace_log_para(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, title, "Entry was not found", "uniqueHashKey: 0x%016llx, tag: %s", uniqueHashKey, tag);
+        UNLOCK();
         return NULL;
     }
+
     _cache_move_to_front(cache, entry);
+    if (cache->valueRefCountIncrementFunc) {
+        // Callback to increase the ref count before returning to the caller so if the entry is evicted the value is not freed
+        cache->valueRefCountIncrementFunc(entry->value);
+    }
+
     KEYISOP_trace_log_para(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, title, "Get value", "index: %u, uniqueHashKey: 0x%016llx", index, uniqueHashKey);
+    UNLOCK();
     return entry->value; 
 }
 
@@ -222,6 +276,9 @@ void KeyIso_cache_free(KMPP_LRU_CACHE *cache)
     if (cache == NULL) {
         return;
     } 
+
+    LOCK();
+
     KMPP_CACHE_ENTRY_ST *entry = cache->head;
     while (entry) {
         KMPP_CACHE_ENTRY_ST *next = entry->next;
@@ -236,12 +293,10 @@ void KeyIso_cache_free(KMPP_LRU_CACHE *cache)
     cache->head = NULL;
     cache->tail = NULL;
 
-    // Zero the hash table
-    for (size_t i = 0; i < cache->capacity; i++) {
-        cache->table[i] = NULL;
-    }
     KeyIso_free(cache->table);
     KeyIso_free(cache);
+    
+    UNLOCK();
 }
 
 
@@ -254,20 +309,28 @@ void KeyIso_cache_remove(KMPP_LRU_CACHE *cache, uint64_t uniqueHashKey, const ch
         KEYISOP_trace_log_error( NULL, 0, KEYISOP_CACHE_TITLE, "Error", "Cache is NULL");
         return;
     }
+    if (tag == NULL) {
+        KEYISOP_trace_log_error( NULL, 0, KEYISOP_CACHE_TITLE, "Error", "Invalid tag NULL");
+        return;
+    }
     if (index >= cache->capacity) {
         KEYISOP_trace_log_error_para(NULL, 0, title, "Failed to remove element", "Invalid index", "uniqueHashKey: 0x%016llx, capacity: %u", uniqueHashKey, cache->capacity);    
         return;
     }
+
+    LOCK();
     KMPP_CACHE_ENTRY_ST *entryToRemove = cache->table[index];
     if (entryToRemove == NULL) {
         // Not an error because the entry might be already evicted by the time we try to remove it, printing a debug message
         KEYISOP_trace_log_para(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, title, "Entry was not found", "uniqueHashKey: 0x%016llx", uniqueHashKey);    
+        UNLOCK();
         return;
     }
     
-    if (entryToRemove->hashKey != uniqueHashKey || strcmp(entryToRemove->tag, tag) != 0) {
+    if (entryToRemove->hashKey != uniqueHashKey || strncmp(entryToRemove->tag, tag, KEYISO_MAX_TAG_LEN) != 0) {
         // The entry is not the one we are looking for, this is not an error, printing a debug message
         KEYISOP_trace_log_para(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, title, "Entry was not found- the removed entry was probably evicted", "uniqueHashKey: 0x%016llx, index:%u", uniqueHashKey, index);
+        UNLOCK();
         return;
     }
 
@@ -292,9 +355,10 @@ void KeyIso_cache_remove(KMPP_LRU_CACHE *cache, uint64_t uniqueHashKey, const ch
 
     // Remove the entry from the table
     cache->table[index] = NULL;
-
+    
     // Decrement the size of the cache
     cache->size-= 1;
+
     if (cache->valueFreeFunc) {
         // Callback to free the value
         cache->valueFreeFunc(entryToRemove->value);
@@ -303,6 +367,7 @@ void KeyIso_cache_remove(KMPP_LRU_CACHE *cache, uint64_t uniqueHashKey, const ch
 
     // Free the entry
     _free_elem(&entryToRemove);
+    UNLOCK();
 }
 
 // Delete all entries with the same tag
@@ -314,6 +379,8 @@ void KeyIso_cache_remove_tag(KMPP_LRU_CACHE *cache, const char *tag)
         KEYISOP_trace_log_error(NULL, 0, title, "Failed to remove elements", "Invalid parameters");
         return;
     }
+
+    LOCK();
     KMPP_CACHE_ENTRY_ST *current = cache->head;
     while (current != NULL) {
         KMPP_CACHE_ENTRY_ST *next = current->next;
@@ -353,14 +420,5 @@ void KeyIso_cache_remove_tag(KMPP_LRU_CACHE *cache, const char *tag)
         }
         current = next;
     }
-}
-
-void KeyIso_cache_print(KMPP_LRU_CACHE *cache)
-{
-    KMPP_CACHE_ENTRY_ST *entry = cache->head;
-    while (entry) {
-        printf("hashKey: %lu, tag: %s", entry->hashKey, entry->tag);
-        entry = entry->next;
-    }
-    printf("\n");
+    UNLOCK();
 }

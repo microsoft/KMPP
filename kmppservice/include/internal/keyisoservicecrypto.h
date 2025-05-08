@@ -229,16 +229,13 @@ int KeyIso_rsa_pss_sign(
 /////////////////////////////////////////////////////
 
 #ifdef KMPP_OPENSSL_SUPPORT
-EVP_PKEY* KeyIso_convert_symcrypt_to_epkey(
+EVP_PKEY* KeyIso_convert_symcrypt_rsa_to_epkey(
     const uuid_t correlationId,
     PSYMCRYPT_RSAKEY symcryptRsaKey);
 
-int KeyIso_convert_ecdsa_symcrypt_to_epkey(
+EVP_PKEY* KeyIso_convert_symcrypt_ecc_to_epkey(
     const uuid_t correlationId,
-    uint32_t curveNid,
-    const PSYMCRYPT_ECKEY inEcPkey,
-    EC_KEY** outEcKey, 
-    EC_GROUP** outEcGroup);
+    const PSYMCRYPT_ECKEY inEcPkey);
 
 #endif // KMPP_OPENSSL_SUPPORT
 

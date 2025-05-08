@@ -3,8 +3,9 @@
  * Licensed under the MIT License
  */
 
-#include "keyisoservicekeygen.h"
 #include "keyisolog.h"
+#include "keyisoservicekeygen.h"
+#include "keyisosymcryptcommon.h"
 #include "keyisoutils.h"
 
 #define RSAKEY_FIPS_MIN_BITSIZE_MODULUS 1024
@@ -146,6 +147,32 @@ PSYMCRYPT_ECURVE KeyIso_get_curve_by_nid(
     }
     
     return pCurve;
+}
+
+// Get nid by symcrypt curve
+int32_t KeyIso_get_curve_nid_from_symcrypt_curve(
+    const uuid_t correlationId,
+    PCSYMCRYPT_ECURVE pCurve)
+{
+    if (pCurve == NULL) {
+        return -1; // Invalid curve
+    }
+
+    if (SymCryptEcurveIsSame(pCurve, _curve_P192)) {
+        return KMPP_ECC_CURVE_NISTP192_NID;
+    } else if (SymCryptEcurveIsSame(pCurve, _curve_P224)) {
+        return KMPP_ECC_CURVE_NISTP224_NID;
+    } else if (SymCryptEcurveIsSame(pCurve, _curve_P256)) {
+        return KMPP_ECC_CURVE_NISTP256_NID;
+    } else if (SymCryptEcurveIsSame(pCurve, _curve_P384)) {
+        return KMPP_ECC_CURVE_NISTP384_NID;
+    } else if (SymCryptEcurveIsSame(pCurve, _curve_P521)) {
+        return KMPP_ECC_CURVE_NISTP521_NID;
+    }
+
+    KEYISOP_trace_log_error(correlationId, 0, KEYISOP_SERVICE_TITLE, "KeyIso_get_curve_nid_from_symcrypt_curve", "Unsupported curve");
+    // Unsupported curve
+    return -1;
 }
 
 static int _ec_key_generate_failure(PSYMCRYPT_ECKEY pKey)

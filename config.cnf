@@ -8,3 +8,6 @@ keyiso_solution_type = process
 [ tpm_isolation ]
 tcti = device:/dev/tpmrm0
 srk_nvram_index = 0x1500020
+
+[ enable_by_default ]
+active = 0

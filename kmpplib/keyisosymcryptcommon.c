@@ -13,8 +13,7 @@
 
 PCSYMCRYPT_HASH KeyIso_get_symcrypt_hash_algorithm(uint32_t mdnid)
 {
-    switch (mdnid)
-    {
+    switch (mdnid) {
         case KMPP_NID_md5:
             return SymCryptMd5Algorithm;
         case KMPP_NID_sha1:

@@ -58,6 +58,7 @@ extern int KEYISOP_traceLogConstructor;
 #define KEYISOP_ECC_SIGN_TITLE             "KMPPEccSign"
 #define KEYISOP_CURL_TITLE                 "KMPPCurl"
 #define KEYISOP_TEST_TITLE                 "KMPPTest"
+#define KEYISOP_PROVIDER_TEST_TITLE        "KMPPProviderTest"
 #define KEYISOP_SERVICE_TITLE              "KMPPService"
 #define KEYISOP_GDBUS_CLIENT_TITLE         "KMPPGdbusClient"
 #define KEYISOP_IPC_CLIENT_TITLE           "KMPPIPCClient"
@@ -74,6 +75,7 @@ extern int KEYISOP_traceLogConstructor;
 #define KEYISOP_LOAD_LIB_TITLE             "KMPPLoadLib"
 #define KEYISOP_CLIENT_CONFIG              "KMPPClientConfig"
 #define KEYISOP_VALIDATE_KEY_TITLE         "KMPPValidateKeyId"
+#define KEYISOP_KMPP_ALLOWED_APPS_TITLE    "KMPPAllowedAppsConfig"
 // TPM
 #define KEYISOP_TPM_SESSION_TITLE              "KMPPTpmSession"
 #define KEYISOP_TPM_KEY_TITLE                  "KMPPTpmKey"

@@ -226,7 +226,7 @@ static const char* _get_rsa_enc_dec_title(int value) {
 }
 
 static KEYISO_RSA_PRIVATE_ENC_DEC_IN_ST* _create_rsa_private_encrypt_decrypt_message(const KEYISO_KEY_CTX *keyCtx,
-    int decrypt, int flen, const unsigned char *from, int tlen, int padding, size_t *structSize) 
+    int decrypt, int flen, const unsigned char *from, int tlen, int padding, int labelLen, size_t *structSize) 
 {
     if (!structSize || !keyCtx || !from)
         return NULL;
@@ -236,8 +236,6 @@ static KEYISO_RSA_PRIVATE_ENC_DEC_IN_ST* _create_rsa_private_encrypt_decrypt_mes
         return NULL;
     }
     
-    // OAEP -The labelLen will need to be added to the size calculation
-    const uint32_t labelLen = 0;
     size_t dynamicLen = KeyIso_get_rsa_enc_dec_params_dynamic_len(flen, labelLen);
     *structSize = GET_DYNAMIC_STRUCT_SIZE(KEYISO_RSA_PRIVATE_ENC_DEC_IN_ST, dynamicLen); 
     KEYISO_RSA_PRIVATE_ENC_DEC_IN_ST* inSt = (KEYISO_RSA_PRIVATE_ENC_DEC_IN_ST *)KeyIso_zalloc(*structSize);
@@ -247,14 +245,12 @@ static KEYISO_RSA_PRIVATE_ENC_DEC_IN_ST* _create_rsa_private_encrypt_decrypt_mes
     _fill_header(&inSt->headerSt, IpcCommand_RsaPrivateEncryptDecrypt, keyCtx->correlationId);
     
     inSt->keyId = keyDetails->keyId;
-    // OAEP - The label needs to be filled here once the client will support provider and keycontext will hold the label
-    // currently label len is set to and the dynamic array holds only `from` bytes
     KeyIso_fill_rsa_enc_dec_param(&inSt->params, decrypt, padding, tlen, flen, labelLen, from); 
     return inSt;
 }
 
-static uint8_t* _create_and_serialize_rsa_private_encrypt_decrypt_message(const KEYISO_KEY_CTX *keyCtx,
-    int decrypt, int flen, const unsigned char *from, int tlen, int padding, size_t *msgLen) 
+static uint8_t* _create_and_serialize_rsa_private_encrypt_decrypt_message(const KEYISO_KEY_CTX *keyCtx, int decrypt, 
+    int flen, const unsigned char *from, int tlen, int padding, int labelLen, size_t *msgLen) 
 {        
     if (!msgLen)
         return NULL;
@@ -262,7 +258,7 @@ static uint8_t* _create_and_serialize_rsa_private_encrypt_decrypt_message(const 
 
     //1. Create struct
     size_t structSize = 0;
-    KEYISO_RSA_PRIVATE_ENC_DEC_IN_ST* inSt = _create_rsa_private_encrypt_decrypt_message(keyCtx, decrypt, flen, from, tlen, padding ,&structSize);
+    KEYISO_RSA_PRIVATE_ENC_DEC_IN_ST* inSt = _create_rsa_private_encrypt_decrypt_message(keyCtx, decrypt, flen, from, tlen, padding, labelLen, &structSize);
     if (inSt == NULL)
         return NULL;
          
@@ -332,11 +328,13 @@ static int _cp_if_valid(const uuid_t correlationId, uint8_t* toBytes, int32_t  b
 
 // RSA Encrypt Decrypt with Encrypted Key
 static KEYISO_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY_IN_ST* _create_rsa_private_encrypt_decrypt_with_attached_key_message(const KEYISO_KEY_CTX *keyCtx,
-    int decrypt, int flen, const unsigned char *from, int tlen, int padding, size_t *totalStSize) 
+    int decrypt, int flen, const unsigned char *from, int tlen, int padding, int labelLen, size_t *totalStSize) 
 {
-    if (!totalStSize || !keyCtx || !from)
+    if (!totalStSize || !keyCtx || !from) {
         return NULL;
+    }
     
+    *totalStSize = 0;
     KEYISO_KEY_DETAILS* keyDetails = (KEYISO_KEY_DETAILS*)keyCtx->keyDetails;
     if (!keyDetails) {
         return NULL;
@@ -350,15 +348,14 @@ static KEYISO_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY_IN_ST* _create_rsa_private_e
         return NULL;
     } 
     
-    // OAEP - The label needs to be filled here once the client will support provider and keycontext will hold the label
-    // currently label len is set to 0 and the dynamic array holds  `from`  and encrypted key bytes
-    size_t dynamicLen = KeyIso_get_rsa_enc_dec_with_attached_key_in_dynamic_bytes_len(keyCtx->correlationId, encKeySt->saltLen, encKeySt->ivLen, encKeySt->hmacLen, encKeySt->encKeyLen, flen, 0);
+    size_t dynamicLen = KeyIso_get_rsa_enc_dec_with_attached_key_in_dynamic_bytes_len(keyCtx->correlationId, encKeySt->saltLen, encKeySt->ivLen, encKeySt->hmacLen, encKeySt->encKeyLen, flen, labelLen);
     if (dynamicLen == 0 || dynamicLen > UINT32_MAX) {
         KeyIso_free(encKeySt);
         KEYISOP_trace_log_error_para(keyCtx->correlationId, 0, KEYISOP_RSA_ENCRYPT_TITLE, "Invalid input", "Invalid dynamic length", "dynamicLen = %ld, flen = %d", dynamicLen, flen);
         return NULL;
     }
-    size_t totalSize =  GET_DYNAMIC_STRUCT_SIZE(KEYISO_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY_IN_ST, dynamicLen);
+
+    size_t totalSize = GET_DYNAMIC_STRUCT_SIZE(KEYISO_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY_IN_ST, dynamicLen);
     KEYISO_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY_IN_ST* inSt = (KEYISO_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY_IN_ST *)KeyIso_zalloc(totalSize);
     if (inSt == NULL) {
         KeyIso_free(encKeySt);
@@ -367,12 +364,14 @@ static KEYISO_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY_IN_ST* _create_rsa_private_e
     
     _fill_header(&inSt->headerSt, IpcCommand_RsaPrivateEncryptDecryptWithAttachedKey, keyCtx->correlationId);
     
-    // Fill message
+    // Fill the open key details
     inSt->algVersion = encKeySt->algVersion;
     inSt->saltLen = encKeySt->saltLen;
     inSt->ivLen = encKeySt->ivLen;
     inSt->hmacLen = encKeySt->hmacLen;
     inSt->encKeyLen = encKeySt->encKeyLen;
+
+    // Copy the encrypted key bytes
     size_t encryptedKeySize = KeyIso_get_enc_key_bytes_len(keyCtx->correlationId, encKeySt->saltLen, encKeySt->ivLen, encKeySt->hmacLen, encKeySt->encKeyLen);
     if (encryptedKeySize == 0) {
         KEYISOP_trace_log_error(keyCtx->correlationId, 0, KEYISOP_OPEN_KEY_TITLE, "encryptedKeySize", "Invalid encrypted key size");
@@ -381,32 +380,33 @@ static KEYISO_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY_IN_ST* _create_rsa_private_e
         return NULL;
     }
     memcpy(inSt->bytes, encKeySt->encryptedKeyBytes, encryptedKeySize);
+    KeyIso_free(encKeySt);
+    encKeySt = NULL;
+
+    // Fill crypto operation details
     inSt->decrypt = decrypt;
     inSt->padding = padding;
     inSt->tlen = tlen;
     inSt->fromBytesLen = flen;
-    // OAEP - The label needs to be filled here once the client will support provider and keycontext will hold the label
-    inSt->labelLen = 0;
-    memcpy(inSt->bytes + encryptedKeySize, from, dynamicLen - encryptedKeySize);
-
-    KeyIso_free(encKeySt);
-
+    inSt->labelLen = labelLen;
+    memcpy(inSt->bytes + encryptedKeySize, from, flen + labelLen);
+     
     // Copy the secret salt
     const char* salt = keyDetails->salt;
     size_t secretSaltLen = strlen(salt);
     if (secretSaltLen >= KEYISO_SECRET_SALT_STR_BASE64_LEN) {
         KEYISOP_trace_log_error(keyCtx->correlationId, 0, KEYISOP_OPEN_KEY_TITLE, "secretSalt", "Invalid secret salt length");  
+        KeyIso_free(inSt);
         return NULL;
     }
     memcpy(inSt->secretSalt, salt, secretSaltLen);
     inSt->secretSalt[KEYISO_SECRET_SALT_STR_BASE64_LEN - 1] = '\0';
-
     *totalStSize = totalSize;
     return inSt;
 }
 
 static uint8_t* _create_and_serialize_rsa_private_encrypt_decrypt_with_attached_key_message(const KEYISO_KEY_CTX *keyCtx,
-    int decrypt, int flen, const unsigned char *from, int tlen, int padding, size_t *msgLen) 
+    int decrypt, int flen, const unsigned char *from, int tlen, int padding, int labelLen, size_t *msgLen) 
 {        
     if (!msgLen)
         return NULL;
@@ -414,7 +414,7 @@ static uint8_t* _create_and_serialize_rsa_private_encrypt_decrypt_with_attached_
 
     //1. Create struct
     size_t structSize = 0;
-    KEYISO_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY_IN_ST* inSt = _create_rsa_private_encrypt_decrypt_with_attached_key_message(keyCtx, decrypt, flen, from, tlen, padding, &structSize);
+    KEYISO_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY_IN_ST* inSt = _create_rsa_private_encrypt_decrypt_with_attached_key_message(keyCtx, decrypt, flen, from, tlen, padding, labelLen, &structSize);
     if (inSt == NULL)
         return NULL;
  
@@ -433,21 +433,27 @@ static uint8_t* _create_and_serialize_rsa_private_encrypt_decrypt_with_attached_
     return msgBuf;
 }
 
-static int _handle_rsa_private_encrypt_decrypt_message_with_attached_key(KEYISO_KEY_CTX *keyCtx,
-    int decrypt, int flen, const unsigned char *from, int tlen, unsigned char *to, int padding)
+static int _handle_rsa_private_encrypt_decrypt_message_with_attached_key(KEYISO_KEY_CTX *keyCtx, int decrypt, 
+    int flen, const unsigned char *from, int tlen, unsigned char *to, int padding, int labelLen)
 {
     //1. Create the structure and encode it
     size_t msgLen = 0;
     uint32_t command = IpcCommand_RsaPrivateEncryptDecryptWithAttachedKey;
-    uint8_t *msgBuf = _create_and_serialize_rsa_private_encrypt_decrypt_with_attached_key_message(keyCtx, decrypt, flen, from, tlen, padding, &msgLen);
+    uint8_t *msgBuf = _create_and_serialize_rsa_private_encrypt_decrypt_with_attached_key_message(keyCtx, decrypt, flen, from, tlen, padding, labelLen, &msgLen);
              
     //2. Send to the server as a generic message
     int result;
     IPC_REPLY_ST *reply = _create_and_send_generic_msg(keyCtx, command, msgLen, msgBuf, &result);    
     KeyIso_clear_free(msgBuf, msgLen);
 
-    //3. Deserialize response (if needed) and return relevant fields
     int actualLen = 0;
+    KEYISO_KEY_DETAILS *keyDetails = (KEYISO_KEY_DETAILS*)keyCtx->keyDetails;
+    if (!keyDetails) {
+        KEYISOP_trace_log_error(keyCtx->correlationId, 0, KEYISOP_RSA_ENCRYPT_TITLE, "keyDetails", "Invalid key details");
+        return actualLen;
+    }
+
+    //3. Deserialize response (if needed) and return relevant fields
     if (reply) {
         if (result == STATUS_OK) {
             KEYISO_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY_OUT_ST *outSt = NULL;
@@ -467,11 +473,10 @@ static int _handle_rsa_private_encrypt_decrypt_message_with_attached_key(KEYISO_
                     if (outSt != NULL) {
                         result = KeyIso_deserialize_rsa_enc_dec_with_attached_key_out(reply->outSt, reply->outLen, outSt);
                         if (result == STATUS_OK) {
+                            keyDetails->keyId = outSt->keyId;
                             if (_cp_if_valid(keyCtx->correlationId, outSt->toBytes, outSt->bytesLen, to, tlen) == STATUS_OK) {
                                 actualLen = outSt->bytesLen;
                             }
-                            KEYISO_KEY_DETAILS* keyDetails = (KEYISO_KEY_DETAILS*)keyCtx->keyDetails;
-                            keyDetails->keyId = outSt->keyId;
                         }
                         KeyIso_free(outSt);
                     }
@@ -485,13 +490,13 @@ static int _handle_rsa_private_encrypt_decrypt_message_with_attached_key(KEYISO_
 }
 
 
-static int _handle_rsa_private_encrypt_decrypt_message(KEYISO_KEY_CTX *keyCtx,
-    int decrypt, int flen, const unsigned char *from, int tlen, unsigned char *to, int padding)
+static int _handle_rsa_private_encrypt_decrypt_message(KEYISO_KEY_CTX *keyCtx, int decrypt, int flen,
+    const unsigned char *from, int tlen, unsigned char *to, int padding, int labelLen)
 {   
     //1. Create the structure and encode it
     size_t msgLen = 0;
     const uint32_t command = IpcCommand_RsaPrivateEncryptDecrypt;
-    uint8_t *msgBuf = _create_and_serialize_rsa_private_encrypt_decrypt_message(keyCtx, decrypt, flen, from, tlen, padding, &msgLen);
+    uint8_t *msgBuf = _create_and_serialize_rsa_private_encrypt_decrypt_message(keyCtx, decrypt, flen, from, tlen, padding, labelLen, &msgLen);
    
     //2. Send to the server as a generic message
     int result;
@@ -525,7 +530,7 @@ static int _handle_rsa_private_encrypt_decrypt_message(KEYISO_KEY_CTX *keyCtx,
                             KeyIso_free(outSt);
                             KeyIso_free(reply->outSt);
                             KeyIso_free(reply);
-                            return _handle_rsa_private_encrypt_decrypt_message_with_attached_key(keyCtx, decrypt, flen, from, tlen, to, padding);
+                            return _handle_rsa_private_encrypt_decrypt_message_with_attached_key(keyCtx, decrypt, flen, from, tlen, to, padding, labelLen);
 
                         } else if (_cp_if_valid(keyCtx->correlationId, outSt->toBytes, outSt->bytesLen, to, tlen) == STATUS_OK) {                            
                             actualLen = outSt->bytesLen;
@@ -2145,8 +2150,8 @@ int KeyIso_client_msg_ecdsa_sign(KEYISO_KEY_CTX *keyCtx,
     return _handle_ecdsa_sign_message(keyCtx, type, dgst, dlen, sig, sigLen, outLen);
 }
 
-int KeyIso_client_msg_rsa_private_encrypt_decrypt(KEYISO_KEY_CTX *keyCtx,
-                int decrypt, int flen, const unsigned char *from, int tlen, unsigned char *to, int padding)
+int KeyIso_client_msg_rsa_private_encrypt_decrypt(KEYISO_KEY_CTX *keyCtx, int decrypt, int flen, 
+    const unsigned char *from, int tlen, unsigned char *to, int padding, int labelLen)
 {
     const char *title = _get_rsa_enc_dec_title(decrypt);
     if (keyCtx == NULL) {
@@ -2163,7 +2168,7 @@ int KeyIso_client_msg_rsa_private_encrypt_decrypt(KEYISO_KEY_CTX *keyCtx,
         }
     }
     
-    return _handle_rsa_private_encrypt_decrypt_message(keyCtx, decrypt, flen, from, tlen, to, padding);
+    return _handle_rsa_private_encrypt_decrypt_message(keyCtx, decrypt, flen, from, tlen, to, padding, labelLen);
 }
 
 int KeyIso_client_msg_import_symmetric_key(const uuid_t correlationId, int inSymmetricKeyType, unsigned int inKeyLength, 

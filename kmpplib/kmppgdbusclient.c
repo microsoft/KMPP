@@ -129,7 +129,7 @@ IPC_REPLY_ST* KeyIso_send_gdbus(KEYISO_KEY_CTX *keyCtx, const IPC_SEND_RECEIVE_S
         return NULL;
     }
 
-    KEYISO_KEY_DETAILS* keyDetails = (KEYISO_KEY_DETAILS*)keyCtx->keyDetails;
+    KEYISO_KEY_DETAILS *keyDetails = (KEYISO_KEY_DETAILS*)keyCtx->keyDetails;
     if (isPermanentSessionRequired && (keyDetails == NULL || keyDetails->interfaceSession == NULL)) {
         return NULL;
     }
@@ -151,26 +151,28 @@ IPC_REPLY_ST* KeyIso_send_gdbus(KEYISO_KEY_CTX *keyCtx, const IPC_SEND_RECEIVE_S
         proxy = GDBUS_get_kmpp_proxy(keyCtx->correlationId);
         if (proxy == NULL) {
             GDBUS_g_variant_unref(fromVariant);
+            fromVariant = NULL;
             KEYISOP_trace_log_error(keyCtx->correlationId, 0, KEYISOP_GDBUS_CLIENT_TITLE, "GDBUS_get_kmpp_proxy", "no proxy - IPC_FAILURE");
             *result = IPC_FAILURE;
         }
     }
     else if (_get_gdbus_session_proxy(keyCtx, &proxy) == STATUS_FAILED) {
         GDBUS_g_variant_unref(fromVariant);
+        fromVariant = NULL;
         KEYISOP_trace_log_error_para(keyCtx->correlationId, 0, KEYISOP_GDBUS_CLIENT_TITLE, "_get_gdbus_session_proxy", "no proxy - IPC_FAILURE", "IPC command: %u", ipcSt->command);
         *result = IPC_FAILURE;
     } 
-    
     if (*result == IPC_FAILURE)
         return NULL;
 
     //2. Send on IPC
     int retryCount = 0;    
-
-    while (retryCount < MAX_DBUS_RETRY ) {
-        if (retryCount > 0) { //sleep 500 milliseconds
-            GDBUS_g_variant_unref(toVariant);
-            toVariant = NULL;
+    while (retryCount < MAX_DBUS_RETRY) {
+        if (retryCount > 0) { // sleep 500 milliseconds and unref previous toVariant
+            if (toVariant) {
+                GDBUS_g_variant_unref(toVariant);
+                toVariant = NULL;
+            }
             g_usleep((gulong)(SLEEP_BETWEEN_RETRIES_MILLI * 1000)); // Microseconds
             KEYISOP_trace_log_error(keyCtx->correlationId, KEYISOP_TRACELOG_WARNING_FLAG, KEYISOP_GDBUS_CLIENT_TITLE, "UpdateRetry", "Warning");
         }
@@ -186,30 +188,34 @@ IPC_REPLY_ST* KeyIso_send_gdbus(KEYISO_KEY_CTX *keyCtx, const IPC_SEND_RECEIVE_S
         if (callRet && error == NULL && toVariant != NULL) {
             break;
         }
-
         //3. Handle sending failures
-        if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED)) {
-            // Not supported method, detects the state when service was downgraded to a version that does not support generic client message
-            KMPP_GDBUS_trace_log_glib_error(keyCtx->correlationId, 0, KEYISOP_GDBUS_CLIENT_TITLE,"The method is not supported", &error);
+        if (error && g_error_matches(error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED)) {
+            // Service might be downgraded; report unsupported method.
+            KMPP_GDBUS_trace_log_glib_error(keyCtx->correlationId, 0, KEYISOP_GDBUS_CLIENT_TITLE, "The method is not supported", &error);
             *result = IPC_UNKNOWN_METHOD;
         } else {
             *result = IPC_FAILURE;
         }
-          
-        KEYISOP_trace_log_error_para(keyCtx->correlationId, 0, KEYISOP_GDBUS_CLIENT_TITLE, "gdbus_kmpp_call_client_message_sync", "failure", "error code= %d", error->code); 
+        KEYISOP_trace_log_error_para(keyCtx->correlationId, 0, KEYISOP_GDBUS_CLIENT_TITLE, "gdbus_kmpp_call_client_message_sync", "failure", "error code= %d", error ? error->code : -1);
         KMPP_GDBUS_trace_log_glib_error(keyCtx->correlationId, 0, KEYISOP_GDBUS_CLIENT_TITLE, "failure", &error);
+
         if (isPermanentSessionRequired && error && GDBUS_is_gdbus_retry_error(error)) {
-            KMPP_GDBUS_trace_log_glib_error(keyCtx->correlationId, 0, KEYISOP_GDBUS_CLIENT_TITLE, "IPC_RETRY_NEEDED", &error);        
             retryCount++;
         }
-        else //no retry
+        else {
             break;
-        
+        }
+
+        if (error) {
+            g_clear_error(&error);
+        }
     }
     if (error) {
-        g_error_free(error);
+        g_clear_error(&error);
     }
+ 
     GDBUS_g_variant_unref(fromVariant);
+    fromVariant = NULL;
     if (proxy != NULL) {
         GDBUS_g_object_unref(proxy);
         proxy = NULL;
@@ -218,6 +224,7 @@ IPC_REPLY_ST* KeyIso_send_gdbus(KEYISO_KEY_CTX *keyCtx, const IPC_SEND_RECEIVE_S
     bool needToGetReply = (*result == STATUS_OK);
     if (!needToGetReply) {
         GDBUS_g_variant_unref(toVariant);  
+        toVariant = NULL;
         if (ipcSt->command == IpcCommand_CloseKey)
             *result = callRet;
         return NULL;
@@ -232,13 +239,11 @@ IPC_REPLY_ST* KeyIso_send_gdbus(KEYISO_KEY_CTX *keyCtx, const IPC_SEND_RECEIVE_S
     if (toBytes == NULL || toLength <= 0) {
         *result = IPC_FAILURE;
         KEYISOP_trace_log_error(keyCtx->correlationId, 0, KEYISOP_GDBUS_CLIENT_TITLE, "toVariant", "Format error");
-        
     } else {
         reply = (IPC_REPLY_ST *)KeyIso_zalloc(sizeof(IPC_REPLY_ST) + (int)toLength);
         if (reply == NULL) {
             *result = IPC_FAILURE;
             KEYISOP_trace_log_error(keyCtx->correlationId, 0, KEYISOP_GDBUS_CLIENT_TITLE, "reply", "allocation error");
-            
         } else {
             reply->command = ipcSt->command;
             reply->outLen = (int)toLength;
@@ -248,6 +253,7 @@ IPC_REPLY_ST* KeyIso_send_gdbus(KEYISO_KEY_CTX *keyCtx, const IPC_SEND_RECEIVE_S
     }
 
     GDBUS_g_variant_unref(toVariant);  
+    toVariant = NULL;
 
     if (!isPermanentSessionRequired)
         GDBUS_exhaust_main_loop_events();

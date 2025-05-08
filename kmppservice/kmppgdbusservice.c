@@ -28,7 +28,6 @@
 #define KMPP_SERVICE_NAME KMPP_USER_NAME "service"
 #define KMPP_SERVICE_MAX_SUPPORTED_KEY_CACHE_SIZE 100000
 #define KMPP_CACHE_CAPACITY_CONFIG_STR "keyCacheCapacity="
-uint32_t g_keyCacheCapacity;
 
 static gboolean _on_handle_get_version(
     GdbusKmpp *interface,
@@ -236,7 +235,6 @@ int main(int argc, char *argv[])
 
     KeyIso_rand_bytes(correlationId, sizeof(correlationId));
     openlog(KMPP_SERVICE_NAME, LOG_CONS, LOG_USER);
-    KeyIso_initialize_locks();
 
     if (argc > 1) {
         const char *defaultCertArea = NULL;
@@ -334,8 +332,9 @@ int main(int argc, char *argv[])
         KEYISOP_trace_log(correlationId, 0, title, "Key hash size not set, using default.");
         keyCacheCapacity = KEYISO_KEY_DEFAULT_HASH_SIZE;
     }
-    g_keyCacheCapacity = keyCacheCapacity;
+    
     KEYISOP_trace_log_para(correlationId, 0, title,"Key hash size set", "value: %d", keyCacheCapacity);
+    KeyIso_initialize_key_list(correlationId, keyCacheCapacity);
     
     // Must be called prior to any other OpenSSL function calls.
     // Loading OpenSSL configuration file to support other OpenSSL engines.
@@ -404,7 +403,7 @@ int main(int argc, char *argv[])
     KeyIsoP_stop_cpu_timer();
 #endif
     KEYISO_EC_free_static();  // free static variables
-    KeyIso_clear_locks();
+    KeyIso_clear_key_list();
     KEYISOP_trace_log_error(correlationId, KEYISOP_TRACELOG_WARNING_FLAG, title, "g_main_loop_run", "Exit");
     return 0;
 

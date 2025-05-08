@@ -219,7 +219,7 @@ void KeyIsoP_set_execute_flags(
     if (flags & KEYISOP_TRACE_LOG_TEST_EXECUTE_FLAG) {
         KEYISOP_traceLogTest = 1;
     }
-
+    
     if (flags & KEYISOP_TRACE_LOG_VERBOSE_EXECUTE_FLAG) {
         KEYISOP_traceLogVerbose = 1;
     }
@@ -294,13 +294,13 @@ size_t KeyIso_get_ecdsa_sign_with_attached_key_in_dynamic_bytes_len(const uuid_t
 
 size_t KeyIso_get_rsa_enc_dec_params_dynamic_len(uint32_t fromBytesLen, uint32_t labelLen)
 {
-    int32_t totalLen = 0;
+    uint32_t totalLen = 0;
     if (KEYISO_ADD_OVERFLOW(fromBytesLen, labelLen, &totalLen)) {
         KEYISOP_trace_log_error(NULL, 0, KEYISOP_ENGINE_TITLE, "Invalid format", "Invalid total length");
         return 0;
     }
 
-    if (totalLen  <= 0) {
+    if (totalLen  == 0) {
         KEYISOP_trace_log_error(NULL, 0, KEYISOP_ENGINE_TITLE, "Invalid format", "Invalid total length");
         return 0;
     }
@@ -358,7 +358,163 @@ int KeyIso_symmetric_key_encrypt_decrypt_size(
     return STATUS_OK;
 }
 
+static bool _is_valid_extra_data_header(
+    const uuid_t correlationId,
+    KeyIsoSolutionType expectedSolutionType,
+    KEYISO_ENCRYPTION_EXTRA_DATA_HEADER_ST* header)
+{
+    const char *title = KEYISOP_HELPER_PFX_TITLE;
 
+    if (header->version < KEYISOP_PKCS8_MIN_VERSION) {
+        KEYISOP_trace_log_error_para(correlationId, 0, title, NULL, "Invalid version", "version: %hu,  min version that supports extra data: %u", header->version, KEYISOP_PKCS8_MIN_VERSION);
+        return false;
+    }
+
+    if (header->solutionType != expectedSolutionType) {
+        KEYISOP_trace_log_error_para(correlationId, 0, title, NULL, "The key is encrypted by a different isolation solution then is currently selected by config", 
+                                     "key type: %d, expected type: %d", header->solutionType, expectedSolutionType);
+        return false;
+    }
+
+    return true;
+}
+
+static int _get_salt_from_extra_data(
+    const uuid_t correlationId,
+    uint32_t solutionType, 
+    uint32_t extraDataLength,
+    unsigned char *extraDataBuff,
+    char **outSalt)
+{
+    const char *title = KEYISOP_HELPER_PFX_TITLE;
+    int ret = STATUS_FAILED;
+
+    // Read the extra data based on the solution type
+    switch (solutionType) {
+        case KeyIsoSolutionType_process:
+        case KeyIsoSolutionType_tz:
+        {
+            KEYISO_KMPP_SERVICE_EXTRA_DATA_ST* defaultSolutionExtraDataSt = (KEYISO_KMPP_SERVICE_EXTRA_DATA_ST*)KeyIso_zalloc(extraDataLength);
+            if (defaultSolutionExtraDataSt == NULL) {
+                // Allocation failed
+                return ret;
+            }
+            memcpy(defaultSolutionExtraDataSt, extraDataBuff, extraDataLength);
+            if (defaultSolutionExtraDataSt->saltLength == 0) {
+                KEYISOP_trace_log_error_para(correlationId, 0, title, "Invalid salt length", "salt cant be null for this isolation type", "isolation type: %d", defaultSolutionExtraDataSt->header.solutionType);
+                KeyIso_clear_free(defaultSolutionExtraDataSt, extraDataLength);
+                return ret;
+            }
+
+            if (defaultSolutionExtraDataSt->saltLength < KEYISO_SECRET_SALT_STR_BASE64_LEN) {
+                KEYISOP_trace_log_error_para(correlationId, 0, title, "Invalid salt length", "salt length is too small", "salt length: %d", defaultSolutionExtraDataSt->saltLength);
+                KeyIso_clear_free(defaultSolutionExtraDataSt, extraDataLength);
+                return ret;
+            }
+
+            char *salt = (char*) KeyIso_zalloc(defaultSolutionExtraDataSt->saltLength + 1);
+            if (salt == NULL) {
+                // Allocation failed
+                KeyIso_clear_free(defaultSolutionExtraDataSt, extraDataLength);
+                return ret;
+            }
+
+            memcpy(salt, &defaultSolutionExtraDataSt->salt, defaultSolutionExtraDataSt->saltLength);
+            salt[defaultSolutionExtraDataSt->saltLength] = '\0';
+            *outSalt = salt;
+            KeyIso_clear_free(defaultSolutionExtraDataSt, extraDataLength);
+            return STATUS_OK;
+        }
+        case KeyIsoSolutionType_tpm:
+        {
+            // No need for extra data for TPM , only header that defines the version and solution type
+            // TPM additional data that needed for opening the key is stored in the pkcs#8 
+            return STATUS_OK;
+
+        }
+        default:
+            KEYISOP_trace_log_error_para(correlationId, 0, title, "Invalid solutionType", "cant parse keyid", "solutionType: %d", solutionType);
+            return ret;
+    }
+}
+
+int KeyIso_get_salt_from_keyid(
+    const uuid_t correlationId,
+    KeyIsoSolutionType expectedSolutionType,
+    const char *keyId, // Expects new version keyid format:  'n' <Base64 ExtraDataBuffer> ':' <Base64 PFX>
+    unsigned int encodedExtraDataLength,
+    char **outSalt) 
+{   
+    int ret = STATUS_FAILED;
+    const char *title = KEYISOP_HELPER_PFX_TITLE;
+    unsigned char *extraDataBuff = NULL;
+    char *encodedExtraData = NULL;
+
+    if (keyId[0] != VERSION_CHAR) {
+        KEYISOP_trace_log_error_para(correlationId, 0, title, "Invalid first byte", "Invalid version char", "char: %c", keyId[0]);
+        return ret;
+    }
+
+    if (outSalt == NULL) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "Invalid parameter", "outSalt ptr cant be null");
+        return ret;
+    }
+
+    *outSalt = NULL;
+    encodedExtraData = (char *) KeyIso_zalloc(encodedExtraDataLength);
+    if (encodedExtraData == NULL) {
+        // Allocation failed
+        return ret;
+    }
+    
+    memcpy(encodedExtraData, keyId + 1, encodedExtraDataLength - 1); // Skip the 'n' version byte and the ':' delimiter
+    encodedExtraData[encodedExtraDataLength - 1] = '\0';        
+    
+    size_t extraDataLength = KeyIso_base64_decode(correlationId, encodedExtraData, &extraDataBuff);
+    // Free buffer after decoding
+    KeyIso_clear_free(encodedExtraData, encodedExtraDataLength);
+    encodedExtraData = NULL;
+
+    if (extraDataBuff == NULL) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "KeyIso_base64_decode failed", "decoded buffer is null");
+        return ret;
+    }
+
+    // Check if the decoded data is long enough to contain the header
+    if (extraDataLength < sizeof(KEYISO_ENCRYPTION_EXTRA_DATA_HEADER_ST)) {
+        KEYISOP_trace_log_error_para(correlationId, 0, title, "Invalid decoded data length", "buffer too short", "extraDataLength: %d", extraDataLength);
+        KeyIso_clear_free(extraDataBuff, extraDataLength);
+        return ret;
+    }
+    
+    // Check alignment of the header
+    if ((uintptr_t)extraDataBuff % sizeof(KEYISO_ENCRYPTION_EXTRA_DATA_HEADER_ST) != 0) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "Invalid decoded data alignment", "buffer not aligned to header size");
+        KeyIso_clear_free(extraDataBuff, extraDataLength);
+        return ret;
+    }
+    
+    KEYISO_ENCRYPTION_EXTRA_DATA_HEADER_ST header;
+    memset(&header, 0, sizeof(header));
+
+    // Read the header from the buffer
+    memcpy(&header, extraDataBuff, sizeof(KEYISO_ENCRYPTION_EXTRA_DATA_HEADER_ST));
+    if (!_is_valid_extra_data_header(correlationId, expectedSolutionType, &header)) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "Invalid keyid", "invalid extradata header");
+        KeyIso_clear_free(extraDataBuff, extraDataLength);
+        return ret;
+    }
+
+    ret = _get_salt_from_extra_data(correlationId, header.solutionType, extraDataLength, extraDataBuff, outSalt);
+    if (ret != STATUS_OK) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "Invalid keyid", "cant parse keyid");
+        KeyIso_clear_free(extraDataBuff, extraDataLength);
+        return ret;
+    }
+
+    KeyIso_clear_free(extraDataBuff, extraDataLength);
+    return STATUS_OK;
+}
 
 /////////////////////////////////////////////////////////////////
 /////////////// BASE 64 Encode/Decode  /////////////////////////

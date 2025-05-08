@@ -18,7 +18,10 @@
 #include "keyisoctrl.h"
 #include "keyisoservicekeylist.h"
 #include "keyisoservicekeylistgdbus.h"
+#include "keyisoserviceapi.h"
+#include "keyisoservicecrypto.h"
 #include "keyisoservicekey.h"
+#include  "keyisoutils.h"
 
 #include "kmppgdbusclient.h"
 #include "kmppgdbusclientcommon.h"
@@ -30,6 +33,144 @@ static const PFN_rsa_operation KEYISO_SERVER_rsa_operations[] =
     KeyIso_SERVER_rsa_sign_ossl,
     KeyIso_SERVER_pkey_rsa_sign_ossl
 };
+
+/* Functions that depend on both OSSL and Symcrypt. New key format support from old flow. */
+EVP_PKEY* KeyIso_convert_kmpp_key_to_evp(
+    const uuid_t correlationId,
+    PKMPP_KEY pKmppKey)
+{
+    const char *title = KEYISOP_SERVICE_TITLE;
+    EVP_PKEY *evpKey = NULL; // KeyIso_SERVER_free_key()
+    if (pKmppKey == NULL) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "KeyIso_convert_kmpp_key_to_evp", "Invalid argument");
+        return NULL;
+    }
+
+    if (pKmppKey->type == KmppKeyType_rsa) {
+        PSYMCRYPT_RSAKEY pSymCryptRsaKey = (PSYMCRYPT_RSAKEY)pKmppKey->key;
+        if (pSymCryptRsaKey) {
+            evpKey = KeyIso_convert_symcrypt_rsa_to_epkey(correlationId, pSymCryptRsaKey);
+            if (evpKey == NULL) {
+                KEYISOP_trace_log_error(correlationId, 0, title, "KeyIso_convert_kmpp_key_to_evp", "Failed to convert SymCrypt RSA key to EVP_PKEY");
+                return NULL;
+            }
+        }
+    } else if (pKmppKey->type == KmppKeyType_ec) {
+        PSYMCRYPT_ECKEY pSymCryptEckey = (PSYMCRYPT_ECKEY)pKmppKey->key;
+        if (pSymCryptEckey) {
+            evpKey = KeyIso_convert_symcrypt_ecc_to_epkey(correlationId, pSymCryptEckey);
+            if (evpKey == NULL) {
+                KEYISOP_trace_log_error(correlationId, 0, title, "KeyIso_convert_kmpp_key_to_evp", "Failed to convert SymCrypt EC key to EVP_PKEY");
+                return NULL;
+            }
+        }
+    } else {
+        KEYISOP_trace_log_error_para(correlationId, 0, title, "KeyIso_convert_kmpp_key_to_evp", "Invalid key type", "key type: %d", pKmppKey->type);
+        return NULL;
+    }    
+    return evpKey;
+}
+
+static void _cleanup_new_keyresources(char* salt, X509_SIG* p8, KEYISO_ENCRYPTED_PRIV_KEY_ST* enKeySt, PKMPP_KEY pKmppKey, const uuid_t correlationId) 
+{
+    if (salt != NULL) {
+        KeyIso_clear_free_string(salt);
+    }
+    if (p8 != NULL) {
+        X509_SIG_free(p8);
+    }
+    if (enKeySt != NULL) {
+        KeyIso_free(enKeySt); 
+    }
+    if (pKmppKey != NULL) {
+        KeyIso_SERVER_free_key(correlationId, pKmppKey); // Free the KMPP key holding the SymCrypt key
+    }
+}
+
+#define _CLEANUP_NEW_KEY_RESOURCES() \
+    _cleanup_new_keyresources(salt, p8, enKeySt, pKmppKey, correlationId)
+
+PKMPP_KEY KeyIso_get_kmpp_key_from_pfx_bytes(
+    const unsigned char *correlationId,
+    const char *inSalt, // Salt for old keys, n + extra data for new keys
+    int pfxBytesLength,
+    const unsigned char *pfxBytes)
+{
+    const char *title = KEYISOP_SERVICE_TITLE;
+    EVP_PKEY *evpKey = NULL; // KeyIso_SERVER_free_key()
+    if (inSalt == NULL) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "KeyIso_get_kmpp_key_from_pfx_bytes", "Invalid argument");
+        return NULL;
+    }
+
+    if (pfxBytes == NULL || pfxBytesLength <= 0) {
+        KEYISOP_trace_log_error_para(correlationId, 0, title, "KeyIso_get_kmpp_key_from_pfx_bytes", "Invalid argument", "pfxBytesLength: %d", pfxBytesLength);
+        return NULL;
+    }
+    if (pfxBytesLength > KMPP_MAX_MESSAGE_SIZE) {
+        KEYISOP_trace_log_error_para(correlationId, 0, title, "KeyIso_get_kmpp_key_from_pfx_bytes", "PFX size exceeds maximum allowed length", "pfxBytesLength: %d", pfxBytesLength);
+        return NULL;
+    }
+
+    size_t inSaltLength = strnlen(inSalt, MAX_EXTRA_DATA_BASE64_LENGTH + 2); // +1 for n , +1 for null
+    if (inSaltLength >= (MAX_EXTRA_DATA_BASE64_LENGTH + 2)) {
+        KEYISOP_trace_log_error_para(correlationId, 0, title, "KeyIso_get_kmpp_key_from_pfx_bytes", "Salt exceeds maximum allowed length or is not null-terminated", "salt length: %d", inSaltLength);
+        return NULL;
+    }
+
+    if (inSalt[0] == VERSION_CHAR) {
+        /* An old client is trying to open a new new through the old PFX-based API. */
+        X509_SIG *p8 = NULL;
+        KEYISO_ENCRYPTED_PRIV_KEY_ST* enKeySt = NULL;
+        PKMPP_KEY pKmppKey = NULL;              // KeyIso_SERVER_free_key() 
+        char *salt = NULL;
+        
+        // 1. Extract the salt from the extra data
+        if (!KeyIso_get_salt_from_keyid(correlationId, KeyIsoSolutionType_process, inSalt, inSaltLength, &salt)) {
+            KEYISOP_trace_log_error(correlationId, 0, title, "Failed to determent key version", "Failed to get salt");
+            _CLEANUP_NEW_KEY_RESOURCES();
+            return NULL;
+        }
+
+        // 2. Extract the encrypted private key from the PFX
+        if (!KeyIso_pkcs12_parse_p8(correlationId, pfxBytesLength, pfxBytes, &p8, NULL, NULL)) {
+            KEYISOP_trace_log_error(correlationId, 0, title, "Failed to determent key version", "KeyIso_pkcs12_parse_p8 failed");
+            _CLEANUP_NEW_KEY_RESOURCES();
+            return NULL;
+        }
+
+        // 3. Convert the P8 to a KMPP encrypted key
+        if (!KeyIso_create_enckey_from_p8(p8, &enKeySt)) {
+            KEYISOP_trace_log_error(correlationId, 0, title, "Failed to determent key version", "KeyIso_create_enckey_from_p8 failed");
+            _CLEANUP_NEW_KEY_RESOURCES();
+            return NULL;
+        }
+
+        // 4. Open the private key holding the SymCrypt key
+        if (!KeyIso_SERVER_open_private_key(correlationId, salt, enKeySt, &pKmppKey)) {
+           KEYISOP_trace_log_error(correlationId, 0, title, "Failed to open private key", "KeyIso_SERVER_open_private_key failed");
+           _CLEANUP_NEW_KEY_RESOURCES();
+           return NULL;
+        }
+
+        // 5. Convert the return Symcrypt key to an EVP_PKEY
+        evpKey = KeyIso_convert_kmpp_key_to_evp(correlationId, pKmppKey);
+        if (evpKey == NULL) {
+            KEYISOP_trace_log_error(correlationId, 0, title, "Failed to convert KMPP key to EVP_PKEY", "KeyIso_convert_kmpp_key_to_evp failed");
+            _CLEANUP_NEW_KEY_RESOURCES();
+            return NULL;
+        }
+        _CLEANUP_NEW_KEY_RESOURCES();
+
+    }  else {
+        /*  An old client is trying to open an old key through the old PFX-based API. */
+        if (!KeyIso_SERVER_pfx_open(correlationId, pfxBytesLength, pfxBytes, inSalt, (void**)(&evpKey))) {
+            KEYISOP_trace_log_error(correlationId, 0, title, "Failed to open private key", "KeyIso_SERVER_pfx_open failed");
+            return NULL;
+        }
+    }
+    return KeyIso_kmpp_key_create(correlationId, KmppKeyType_epkey, evpKey); // Create a KMPP key holding the EVP_PKEY
+}
 
 gboolean KeyIso_on_handle_import_pfx(
     GdbusKmpp *interface,
@@ -390,7 +531,6 @@ gboolean KeyIso_on_handle_pfx_open(
     gpointer user_data)
 {
     GDBusConnection *connection = g_dbus_method_invocation_get_connection(invocation);
-    EVP_PKEY* evpKey;
     const gchar *senderName = g_dbus_method_invocation_get_sender(invocation);
     const char *title = KEYISOP_SERVICE_TITLE;
     const char *loc = "";
@@ -425,20 +565,11 @@ gboolean KeyIso_on_handle_pfx_open(
         goto err;
     }
 
-    if (!KeyIso_SERVER_pfx_open(
-            correlationId,
-            pfxBytesLength,
-            pfxBytes,
-            arg_salt,
-            (void*)&evpKey)) {
-        loc = "KeyIso_SERVER_pfx_open";
+    pkeyPtr = KeyIso_get_kmpp_key_from_pfx_bytes(correlationId, arg_salt, pfxBytesLength, pfxBytes);
+    if (pkeyPtr == NULL) {
+        loc = "KeyIso_get_kmpp_key_from_pfx_bytes";
+        code = G_DBUS_ERROR_INVALID_ARGS;
         goto end;
-    }
-
-    pkeyPtr = KeyIso_kmpp_key_create(correlationId, KmppKeyType_epkey, evpKey);
-    if (!pkeyPtr) {
-        loc = "KeyIso_SERVER_pfx_open";
-        goto err;
     }
 
     // Ignore any add sender errors

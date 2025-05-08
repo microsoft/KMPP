@@ -21,6 +21,8 @@
 #define KMPP_CONFIG_PATH KMPP_INSTALL_IMAGE_DIR "/config.cnf"
 #define KMPP_CONFIG_SECTION "kmpp_config"
 #define KMPP_CONFIG_SOLUTION_TYPE "keyiso_solution_type"
+#define KMPP_CONFIG_KMPP_ENABLE_BY_DEFAULT_TYPE "enable_by_default"
+#define KMPP_CONFIG_KMPP_ENABLE_BY_DEFAULT_ACTIVE "active"
 #define KMPP_CONFIG_SOLUTION_TYPE_PROCESS "process"
 #define KMPP_CONFIG_SOLUTION_TYPE_TZ "tz"
 #define KMPP_CONFIG_SOLUTION_TYPE_TPM "tpm"
@@ -35,10 +37,10 @@ KEYISO_CLIENT_CONFIG_ST g_config;
 
 static CRYPTO_ONCE selectedKeyIsoSolutionTypeOnce = CRYPTO_ONCE_STATIC_INIT; // Make sure that the selectedKeyIsoSolutionType is initialized only once
 
-static void _set_isolation_solution(KeyIsoSolutionType solution, CLIENT_MSG_HANDLER_FUNCTIONS_TABLE_ST msgHandlerImp, bool isDefault) 
+static void _set_isolation_solution(KeyIsoSolutionType solution, CLIENT_MSG_HANDLER_FUNCTIONS_TABLE_ST msgHandlerImp, bool isDefaultSolutionType) 
 {
     g_config.solutionType = solution;
-    g_config.isDefault = isDefault;
+    g_config.isDefaultSolutionType = isDefaultSolutionType;
     g_msgHandlerImplementation = msgHandlerImp;
     g_msgHandlerImplementation.set_config(&g_config);
 }
@@ -47,6 +49,7 @@ static void _set_default_isolation_solution()
 {
     KeyIsoSolutionType solution = KeyIsoSolutionType_process;
 #ifndef KMPP_GENERAL_PURPOSE_TARGET
+    
     solution = KeyIso_get_isolation_solution_for_tz();
 #endif
     CLIENT_MSG_HANDLER_FUNCTIONS_TABLE_ST msgHandlerImp = keyIsoMsgHandlerImplementation;
@@ -103,6 +106,17 @@ static KeyIsoSolutionType _get_solution_type_from_config(CONF *conf)
     return _get_solution_type(solution_type_str);
 }
 
+static bool _get_enable_by_default_from_config(CONF* conf)
+{
+    char* enableByDefaultStr = NCONF_get_string(conf, KMPP_CONFIG_KMPP_ENABLE_BY_DEFAULT_TYPE, KMPP_CONFIG_KMPP_ENABLE_BY_DEFAULT_ACTIVE);
+    if (enableByDefaultStr == NULL) {
+        KEYISOP_trace_log_openssl_error_para(NULL, 0, KEYISOP_LOAD_LIB_TITLE, "config load failed", "kmpp_enable_by_default not found in config file", "configFilePath %s", KMPP_CUSTOM_CONFIG_PATH);
+        return false;  // Default to false
+    }
+
+    return strncmp(enableByDefaultStr, "1", 1) == 0;
+}
+
 // Main function to load the client configuration
 static void _kmpp_client_load_config() 
 {
@@ -122,6 +136,9 @@ static void _kmpp_client_load_config()
         _set_default_isolation_solution();
         return;
     }
+
+    // Set the enable by default flag per the subscription acoording to the configuration
+    g_config.isKmppEnabledByDefault = _get_enable_by_default_from_config(conf);
 
     // Set message handler implementation based on solution type
     switch (solution) {

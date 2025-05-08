@@ -79,9 +79,6 @@ const char *KeyIsoP_get_default_private_area();
 const char *KeyIsoP_get_default_cert_dir();
 const char *KeyIsoP_get_install_image_dir();
 
-// Includes NULL terminator character
-#define KEYISOP_BASE64_ENCODE_LENGTH(inLength) ((((inLength + 3 - 1) / 3) * 4) + 1)
-
 // Returns number of decode bytes. For a decode error returns -1.
 int KeyIso_base64_decode(
     const uuid_t correlationId,

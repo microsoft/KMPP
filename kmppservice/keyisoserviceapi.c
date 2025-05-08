@@ -841,7 +841,7 @@ static int _rsa_fallback_to_openssl(
         return res;
     }
     // Fallback to OpenSSL
-    EVP_PKEY* epkey = KeyIso_convert_symcrypt_to_epkey(correlationId, kmppPtr->key);
+    EVP_PKEY* epkey = KeyIso_convert_symcrypt_rsa_to_epkey(correlationId, kmppPtr->key);
     KEYISOP_trace_log_error(correlationId, KEYISOP_TRACELOG_WARNING_FLAG, title, message, "Fallback to OpenSSL");
 
     res = fallbackFunction(correlationId, epkey, flen, from, tlen, to, padding);
@@ -1217,7 +1217,7 @@ static int _ecdsa_fallback_to_openssl(
                                                   STATUS_FAILED);
     }
 
-    res = KeyIso_convert_ecdsa_symcrypt_to_epkey(correlationId,
+    res = KeyIso_convert_symcrypt_ecc_to_epkey(correlationId,
                                                  curve,
                                                  ecKey,
                                                  ecGroup,                                                
@@ -1227,7 +1227,7 @@ static int _ecdsa_fallback_to_openssl(
         return _cleanup_ecdsa_fallback_to_openssl(correlationId,
                                                   ecKey,
                                                   ecGroup,
-                                                  "Fallback to OpenSSL- KeyIso_convert_ecdsa_symcrypt_to_epkey failed",
+                                                  "Fallback to OpenSSL- KeyIso_convert_symcrypt_ecc_to_epkey failed",
                                                   STATUS_FAILED);
     }
 

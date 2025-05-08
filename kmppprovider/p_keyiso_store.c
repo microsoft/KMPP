@@ -6,42 +6,53 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <openssl/asn1t.h>
 #include <openssl/core_names.h>
 #include <openssl/core_object.h>
 #include <openssl/provider.h>
+#include <openssl/x509v3.h>
 
 #include "keyisocertinternal.h"
 #include "keyisoclient.h"
 #include "keyisoclientprov.h"
 #include "keyisoclientinternal.h"
-#include "keyisoclientprovinternal.h"
 #include "keyisocommon.h"
 #include "keyisolog.h"
+#include "keyisotelemetry.h"
 #include "keyisomemory.h"
 #include "keyisopfxclientinternal.h"
 #include "p_keyiso.h"
 #include "p_keyiso_err.h"
 
+extern KEYISO_CLIENT_CONFIG_ST g_config;
+#define KEYISO_ENCODER_SELF_GENERATED_CERT_FIRST_DNS "pubkey.cert.kmpp.microsoft.com"
 
-static KEYISO_PROV_STORE_CTX* _store_new_ctx(const char *uri, KEYISO_PROV_PROVCTX *provCtx)
+typedef struct KMPP_RSA_EXPORT_PARAMS_st {
+    BIGNUM *n; // RSA modulus
+    BIGNUM *e; // RSA public exponent
+} KMPP_RSA_EXPORT_PARAMS;
+
+ASN1_SEQUENCE(KMPP_RSA_EXPORT_PARAMS) = {
+    ASN1_SIMPLE(KMPP_RSA_EXPORT_PARAMS, n, BIGNUM),
+    ASN1_SIMPLE(KMPP_RSA_EXPORT_PARAMS, e, BIGNUM),    
+} ASN1_SEQUENCE_END(KMPP_RSA_EXPORT_PARAMS)
+
+// new, free, d2i & i2d functions for KMPP_RSA_PUBLIC_KEY 
+IMPLEMENT_ASN1_FUNCTIONS(KMPP_RSA_EXPORT_PARAMS)
+
+KEYISO_PROV_STORE_CTX* KeyIso_store_new_ctx(const char *uri, KEYISO_PROV_PROVCTX *provCtx)
 {
     KEYISOP_trace_log(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_PROVIDER_TITLE, "Start");
 
     KEYISO_PROV_STORE_CTX *storeCtx = NULL;
-
-    if (!provCtx) {
-        KMPPerr(KeyIsoErrReason_InvalidParams);
-        return storeCtx;
-    }
 
     if (!uri) {
         KMPPerr(KeyIsoErrReason_FailedToGetUri);
         return storeCtx;
     }
 
-    if (strncmp(uri, KEYISO_PROV_STORE_SCHEME, sizeof(KEYISO_PROV_STORE_SCHEME) - 1) != 0) {
-        // Not our store. Not an Error, just exit.
-        KEYISOP_trace_log_error(NULL, KEYISOP_TRACELOG_WARNING_FLAG, KEYISOP_PROVIDER_TITLE, "Not our store", "");
+    if (!provCtx) {
+        KMPPerr(KeyIsoErrReason_InvalidParams);
         return storeCtx;
     }
 
@@ -51,7 +62,7 @@ static KEYISO_PROV_STORE_CTX* _store_new_ctx(const char *uri, KEYISO_PROV_PROVCT
     }
 
     KEYISOP_trace_log_para(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_PROVIDER_TITLE, "STORE", "uri: %s", uri);
-    storeCtx->keyId = KeyIso_strndup(uri + sizeof(KEYISO_PROV_STORE_SCHEME), KEYISO_MAX_KEY_ID_LEN);
+    storeCtx->keyId = KeyIso_strndup(uri, KEYISO_MAX_KEY_ID_LEN);
     storeCtx->provCtx = provCtx;
     storeCtx->status = KeyisoProvStoreStatus_unloaded;
  
@@ -62,7 +73,18 @@ static KEYISO_PROV_STORE_CTX* _rsa_store_open(KEYISO_PROV_PROVCTX *provCtx, cons
 {
     KEYISOP_trace_log(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_PROVIDER_TITLE, "Start");
 
-    return _store_new_ctx(uri, provCtx);
+    if (!uri) {
+        KMPPerr(KeyIsoErrReason_FailedToGetUri);
+        return NULL;
+    }
+
+    if (strncmp(uri, KEYISO_PROV_STORE_SCHEME, sizeof(KEYISO_PROV_STORE_SCHEME) - 1) != 0) {
+        // Not our store. Not an Error, just exit.
+        KEYISOP_trace_log_error(NULL, KEYISOP_TRACELOG_WARNING_FLAG, KEYISOP_PROVIDER_TITLE, "Not our store", "");
+        return NULL;
+    }
+
+    return KeyIso_store_new_ctx(uri + sizeof(KEYISO_PROV_STORE_SCHEME), provCtx);
 }
 
 static const OSSL_PARAM *_rsa_store_settable_ctx_params(ossl_unused void *provCtx)
@@ -82,12 +104,45 @@ static int _rsa_store_set_ctx_params(ossl_unused KEYISO_PROV_STORE_CTX *ctx, oss
     return STATUS_OK;
 }
 
-static int _cleanup_rsa_store_load(int ret, KeyIsoErrReason reason, X509 *pCert, STACK_OF(X509) *ca, 
-    KEYISO_PROV_PKEY *provKey, char *salt, unsigned char *pfxBytes) 
+static void _get_key_type_and_data_type(EVP_PKEY *pKey, unsigned int *keyType, const char **dataType) 
+{
+    int pkeyType = EVP_PKEY_base_id(pKey);
+
+    switch (pkeyType) {
+        case EVP_PKEY_RSA_PSS:
+            *keyType = EVP_PKEY_RSA_PSS;
+            *dataType = KEYISO_NAME_RSA_PSS;
+            break;
+        case EVP_PKEY_RSA:
+            *keyType = EVP_PKEY_RSA;
+            *dataType = KEYISO_NAME_RSA;
+            break;
+        /*case EVP_PKEY_EC:
+            *keyType = EVP_PKEY_EC;
+            *dataType = KEYISO_NAME_EC;
+            break;*/
+        default:
+            *keyType = EVP_PKEY_NONE;
+            *dataType = NULL;
+            break;
+    }
+}
+
+static int _cleanup_rsa_store_load(int ret, KeyIsoErrReason reason, EVP_PKEY *pKey, X509 *pCert, STACK_OF(X509) *ca, 
+    char *salt, unsigned char *pfxBytes, KEYISO_KEY_CTX *keyCtx) 
 {
     if (ret != STATUS_OK) {
         KMPPerr(reason);
-        KeyIso_rsa_keymgmt_free(provKey);
+        // Corner case cleanup: if the provider key was not created, 
+        // we need to free explicitly the key context and the public key.
+        if (pKey) {
+            EVP_PKEY_free(pKey);
+            pKey = NULL;
+        }
+        if (keyCtx) {
+            KeyIso_CLIENT_pfx_close(keyCtx);
+            keyCtx = NULL;
+        }
     }
 
     if (pCert)
@@ -100,27 +155,149 @@ static int _cleanup_rsa_store_load(int ret, KeyIsoErrReason reason, X509 *pCert,
 }
 
 #define _CLEANUP_RSA_STORE_LOAD(ret, reason) \
-        _cleanup_rsa_store_load(ret, reason, pCert, ca, provKey, salt, pfxBytes)
+        _cleanup_rsa_store_load(ret, reason, pKey, pCert, ca, salt, pfxBytes, keyCtx)
 
-static int _rsa_store_load(KEYISO_PROV_STORE_CTX *storeCtx, OSSL_CALLBACK *object_cb, void *object_cbarg, 
-    ossl_unused OSSL_PASSPHRASE_CALLBACK *pw_cb, ossl_unused void* pw_cbarg)
+bool KeyIso_is_encoder_self_generated_cert(X509 *cert)
+{
+    STACK_OF(GENERAL_NAME) *sanNames = NULL;    
+    bool ret = false;
+    size_t maxDnsNameLen = strlen(KEYISO_ENCODER_SELF_GENERATED_CERT_FIRST_DNS);
+
+    // Get the Subject Alternative Name (SAN) extension
+    sanNames = X509_get_ext_d2i(cert, NID_subject_alt_name, NULL, NULL);
+    if (sanNames != NULL) {
+        // Get the first SAN entry
+        GENERAL_NAME *sanEntry = sk_GENERAL_NAME_value(sanNames, 0);
+        if (sanEntry && sanEntry->d.dNSName && sanEntry->type == GEN_DNS) {
+            char *dnsName = (char *)ASN1_STRING_get0_data(sanEntry->d.dNSName);
+            // Ensure the string is null-terminated
+            if (dnsName && dnsName[ASN1_STRING_length(sanEntry->d.dNSName)] == '\0' &&
+                ASN1_STRING_length(sanEntry->d.dNSName) == (int)strnlen(dnsName, maxDnsNameLen)) {
+                // Check if the first DNS name matches "pubkey.cert.kmpp.microsoft.com"
+                if (strncmp(dnsName, KEYISO_ENCODER_SELF_GENERATED_CERT_FIRST_DNS, maxDnsNameLen) == 0) {
+                    ret = true;
+                }
+            }
+        }
+    }    
+    // Free the SAN names stack
+    sk_GENERAL_NAME_pop_free(sanNames, GENERAL_NAME_free);
+    
+    return ret;
+}
+
+/*
+* Checking if the key is an imported key (not generated by KMPP) which is tied to a valid certificate (not the encoder key generation certificate).
+* and only if that is the case, we will monitor the key as part of keys in use.    
+*/
+static bool _should_key_be_monitored_as_KIU(const uuid_t correlationId, EVP_PKEY *pubKey, X509 *cert)
+{   
+    if (pubKey && cert && !KeyIso_is_encoder_self_generated_cert(cert)) {
+        KEYISOP_trace_log(correlationId, 0, KEYISOP_PROVIDER_TITLE, "The key should indeed be monitored as KIU");
+        return true;
+    }
+
+    KEYISOP_trace_log(correlationId, 0, KEYISOP_PROVIDER_TITLE, "The key should NOT be monitored as KIU");
+    return false;
+}
+
+static void _rsa_params_cleanup(KMPP_RSA_EXPORT_PARAMS *rsaParams)
+{
+    if (rsaParams) {
+        if (rsaParams->n != NULL) {
+            BN_free(rsaParams->n);
+            rsaParams->n = NULL;
+        }
+
+        if (rsaParams->e != NULL) {
+            BN_free(rsaParams->e);
+            rsaParams->e = NULL;
+        }
+
+        KMPP_RSA_EXPORT_PARAMS_free(rsaParams);
+        rsaParams = NULL;
+    }
+}
+
+int KeyIso_encode_rsa_public_key(EVP_PKEY *pubkey, unsigned char **encodedPubKey)
+{
+    if (!pubkey) {
+        KMPPerr(KeyIsoErrReason_InvalidParams);
+        return STATUS_FAILED;
+    }
+
+    int encodedPubKeyLength = 0;
+    KMPP_RSA_EXPORT_PARAMS *rsaParams = KMPP_RSA_EXPORT_PARAMS_new();
+    
+    if (!rsaParams){
+        // Allocation failed
+        return STATUS_FAILED;
+    }
+
+    if (KeyIso_get_rsa_params(pubkey, &rsaParams->n, &rsaParams->e, NULL, NULL) == STATUS_OK &&
+        rsaParams->n && rsaParams->e) { 
+        // Encode the public key parameters to DER format
+        encodedPubKeyLength = i2d_KMPP_RSA_EXPORT_PARAMS(rsaParams, encodedPubKey);
+    } else {    
+        KMPPerr(KeyIsoErrReason_FailedToGetParams);
+    }
+    
+    // Cleanup the allocated resources.
+    _rsa_params_cleanup(rsaParams);
+
+    return encodedPubKeyLength;
+}
+
+static void _declare_key_as_KIU(const uuid_t correlationId, KEYISO_PROV_PKEY *provKey)
+{
+#ifdef KEYS_IN_USE_AVAILABLE
+    unsigned char *encodedPubKey = NULL;
+
+    int encodedPubKeyLength = KeyIso_encode_rsa_public_key(provKey->pubKey, &encodedPubKey);
+
+    if (encodedPubKeyLength > 0 && encodedPubKey != NULL) {
+        KEYISOP_trace_log(correlationId, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_PROVIDER_TITLE, "Loading key to KeysInUse functionality");
+
+        //KeyInUseToDo: provKey->keysInUseCtx = p_scossl_keysinuse_load_key(encodedPubKey, encodedPubKeyLength);
+        if (provKey->keysInUseCtx == NULL) 
+            KMPPerr(KeyIsoErrReason_FailedToLoadKeyForKeysInUse);        
+        
+    } else {
+        KMPPerr(KeyIsoErrReason_FailedEncodingPublicKey);
+    }
+
+    if (encodedPubKey) {
+        KeyIso_free(encodedPubKey);
+        encodedPubKey = NULL;
+    }
+
+#else /* KEYS_IN_USE_AVAILABLE */
+    (void)correlationId; // Mark unused
+    (void)provKey;       // Mark unused
+#endif /* KEYS_IN_USE_AVAILABLE */
+}
+
+int KeyIso_rsa_store_load(KEYISO_PROV_STORE_CTX *storeCtx, OSSL_CALLBACK *objectCb, void *objectCbArg, 
+    ossl_unused OSSL_PASSPHRASE_CALLBACK *pwCb, ossl_unused void* pwCbArg)
 {
     KEYISOP_trace_log(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_PROVIDER_TITLE, "Start");
 
     int ret = 0;
     uuid_t correlationId;
     KEYISO_KEY_CTX *keyCtx = NULL;     // KeyIso_CLIENT_pfx_close()
+    int isKeyP8Compatible = 0;
+    int isServiceP8Compatible = 0;
     int pfxLength = 0;
     unsigned char *pfxBytes = NULL;     // KeyIso_free()
     char *salt = NULL;                  // KeyIso_clear_free_string()
-    KEYISO_PROV_PKEY *provKey = NULL;
     EVP_PKEY *pKey = NULL;
     X509 *pCert = NULL;
     STACK_OF(X509) *ca = NULL;
+    KeyIsoErrReason errReason = KeyIsoErrReason_NoError;
 
     KeyIso_rand_bytes(correlationId, sizeof(correlationId));
 
-    if (!storeCtx) {
+    if (!storeCtx || !storeCtx->provCtx) {
         return _CLEANUP_RSA_STORE_LOAD(STATUS_FAILED, KeyIsoErrReason_InvalidStoreCtx);
     }
 
@@ -132,36 +309,82 @@ static int _rsa_store_load(KEYISO_PROV_STORE_CTX *storeCtx, OSSL_CALLBACK *objec
     }
 
     if (!KeyIso_load_pfx_pubkey(correlationId, pfxLength, pfxBytes, &pKey, &pCert, &ca)) {
-        return _CLEANUP_RSA_STORE_LOAD(STATUS_FAILED, KeyIsoErrReason_FailedToGetPubkey); 
+        return _CLEANUP_RSA_STORE_LOAD(STATUS_FAILED, KeyIsoErrReason_FailedToGetPubKey); 
     }
 
-    if (!KeyIso_CLIENT_private_key_open_from_pfx(correlationId, pfxLength, pfxBytes, salt, &keyCtx)) {
+    isKeyP8Compatible = !KeyIso_is_oid_pbe2(correlationId, pfxBytes, pfxLength);
+    isServiceP8Compatible = (PKCS8_COMPATIBLE == storeCtx->provCtx->p8SrvCompatible);
+
+    if (!KeyIso_open_key_by_compatibility(correlationId, &keyCtx, pfxBytes, pfxLength, salt, isKeyP8Compatible, isServiceP8Compatible)) {
         return _CLEANUP_RSA_STORE_LOAD(STATUS_FAILED, KeyIsoErrReason_FailedToGetKeyCtx); 
     }
+    
+    bool isKIUMonitored = _should_key_be_monitored_as_KIU(correlationId, pKey, pCert);
 
-    // Construct KEYISO_PROV_PKEY and set private key handle
-    provKey = KeyIso_prov_rsa_keymgmt_new(storeCtx->provCtx);
-    if (!provKey) {
-        return _CLEANUP_RSA_STORE_LOAD(STATUS_FAILED, KeyIsoErrReason_FailedToGetProvKey);
+    ret = KeyIso_create_key_object(correlationId, storeCtx->provCtx, keyCtx, pKey, objectCb, objectCbArg, pwCb, pwCbArg, isKIUMonitored);
+    if (ret == STATUS_OK) {
+        KEYISOP_trace_log_and_metric_para(correlationId, 0, g_config.solutionType, KEYISOP_PROVIDER_TITLE, "", 
+            "key was successfully loaded. Key type: %d. isKeyP8Compatible: %d. isServiceP8Compatible: %d. isDefaultSolutionType: %d", 
+            EVP_PKEY_id(pKey), isKeyP8Compatible, isServiceP8Compatible, g_config.isDefaultSolutionType);
+        storeCtx->status = KeyisoProvStoreStatus_success;
+        errReason = KeyIsoErrReason_NoError;
+    } else {
+        storeCtx->status = KeyisoProvStoreStatus_failed;
+        errReason = KeyIsoErrReason_OperationFailed;
     }
-    // Store keyCtx and provCtx in KEYISO_PROV_PKEY 
-    provKey->provCtx = storeCtx->provCtx;
-    provKey->keyCtx = keyCtx;
-	provKey->pubKey = pKey;
 
+    return _CLEANUP_RSA_STORE_LOAD(ret, errReason); 
+}
+
+int KeyIso_create_key_object(const uuid_t correlationId, KEYISO_PROV_PROVCTX *provCtx, KEYISO_KEY_CTX *keyCtx, EVP_PKEY *pubKey, OSSL_CALLBACK *objectCb, void *objectCbArg, 
+    ossl_unused OSSL_PASSPHRASE_CALLBACK *pwCb, ossl_unused void* pwCbArg, bool monitoredByKIU)
+{   
+    KEYISOP_trace_log(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_PROVIDER_TITLE, "Start");
+
+    if (!pubKey) {
+        KMPPerr(KeyIsoErrReason_InvalidParams);
+        return STATUS_FAILED;
+    }
+
+    const char* dataType = NULL;
+    unsigned int keyType = 0;
+    
+    _get_key_type_and_data_type(pubKey, &keyType, &dataType);
+    if (keyType == EVP_PKEY_NONE) {
+        KMPPerr(KeyIsoErrReason_UnsupportedKeyType);
+        return STATUS_FAILED;
+    }
+
+    // Create new KEYISO_PROV_PKEY and set the provider ctx in it
+    KEYISO_PROV_PKEY *provKey = KeyIso_prov_rsa_keymgmt_new(provCtx, keyType);
+    if (!provKey) {
+        // Failed to create new KEYISO_PROV_PKEY
+        return STATUS_FAILED;
+    }
+
+    // Set the keyCtx and pubKey in the KEYISO_PROV_PKEY
+    provKey->keyCtx = keyCtx;
+    provKey->pubKey = pubKey;
+
+    if (monitoredByKIU) {
+       _declare_key_as_KIU(correlationId, provKey);
+    }
+
+    // Construct the parameters for the object callback
     OSSL_PARAM paramsPkey[4];
-    int object_type = OSSL_OBJECT_PKEY;
-    paramsPkey[0] = OSSL_PARAM_construct_int(OSSL_OBJECT_PARAM_TYPE, &object_type);
-    paramsPkey[1] = OSSL_PARAM_construct_utf8_string(OSSL_OBJECT_PARAM_DATA_TYPE, (EVP_PKEY_is_a(pKey, KEYISO_NAME_RSA) || EVP_PKEY_is_a(pKey, KEYISO_NAME_RSA_PSS)) ? KEYISO_NAME_RSA : KEYISO_NAME_EC, 0);
+    int objectType = OSSL_OBJECT_PKEY;
+    paramsPkey[0] = OSSL_PARAM_construct_int(OSSL_OBJECT_PARAM_TYPE, &objectType);
+    paramsPkey[1] = OSSL_PARAM_construct_utf8_string(OSSL_OBJECT_PARAM_DATA_TYPE, (char *)dataType, 0);
     paramsPkey[2] = OSSL_PARAM_construct_octet_string(OSSL_OBJECT_PARAM_REFERENCE, &provKey, sizeof(provKey));
     paramsPkey[3] = OSSL_PARAM_construct_end();
-    ret = object_cb(paramsPkey, object_cbarg);
- 
-    if(ret)
-        storeCtx->status = KeyisoProvStoreStatus_success;
-
-    KeyIsoErrReason errReason = (ret) ? KeyIsoErrReason_NoError : KeyIsoErrReason_OperationFailed;
-    return _CLEANUP_RSA_STORE_LOAD(ret, errReason); 
+    int ret = objectCb(paramsPkey, objectCbArg);
+    if (!ret) {
+        // Failed to call the object callback
+        KeyIso_rsa_keymgmt_free(provKey);
+        KMPPerr(KeyIsoErrReason_OperationFailed);
+        return STATUS_FAILED;
+    }
+    return STATUS_OK;
 }
 
 // Checks if the end of the RSA store context is reached
@@ -183,7 +406,7 @@ static int _rsa_store_eof(KEYISO_PROV_STORE_CTX *ctx)
     return isEofReached;
 }
 
-static int _rsa_store_close(KEYISO_PROV_STORE_CTX *storeCtx)
+int KeyIso_rsa_store_close(KEYISO_PROV_STORE_CTX *storeCtx)
 {
     KEYISOP_trace_log(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_PROVIDER_TITLE, "Start");
 
@@ -201,9 +424,9 @@ const OSSL_DISPATCH keyIso_prov_rsa_store_funcs[] = {
     { OSSL_FUNC_STORE_OPEN, (void (*)(void))_rsa_store_open },
     { OSSL_FUNC_STORE_SETTABLE_CTX_PARAMS, (void (*)(void))_rsa_store_settable_ctx_params },
     { OSSL_FUNC_STORE_SET_CTX_PARAMS, (void (*)(void))_rsa_store_set_ctx_params },
-    { OSSL_FUNC_STORE_LOAD, (void (*)(void))_rsa_store_load },
+    { OSSL_FUNC_STORE_LOAD, (void (*)(void))KeyIso_rsa_store_load },
     { OSSL_FUNC_STORE_EOF, (void (*)(void))_rsa_store_eof },
-    { OSSL_FUNC_STORE_CLOSE, (void (*)(void))_rsa_store_close },
+    { OSSL_FUNC_STORE_CLOSE, (void (*)(void))KeyIso_rsa_store_close },
     { 0, NULL }
 };
 

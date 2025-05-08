@@ -9,6 +9,10 @@
 
 #include <uuid/uuid.h>
 
+#ifdef  __cplusplus
+extern "C" {
+#endif
+
 EVP_PKEY *KeyIso_load_provider_private_key(
     OSSL_LIB_CTX *libCtx,
     const char *providerKeyId);
@@ -26,3 +30,7 @@ int KeyIso_format_pfx_provider_key_id(
     const unsigned char *pfxBytes,
     const char *salt,
     char **keyId);                    // KeyIso_clear_free_string()
+
+#ifdef  __cplusplus
+}
+#endif

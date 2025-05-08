@@ -1,3 +1,8 @@
+# Version 2.1.0
+
+- KMPP provider as an OpenSSL 3.x default provider 
+- Bug fixes
+
 # Version 2.0.0
 
 - OpenSSL 3.x Provider support for RSA operations

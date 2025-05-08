@@ -46,7 +46,7 @@ static int _cleanup_rsa_export_pubkey_to_symcrypt(int ret, KeyIsoErrReason reaso
         _cleanup_rsa_export_pubkey_to_symcrypt(ret, reason, modulusBytes, exponentBytes, modulus, exponent, tmpSymCryptRsaKey)
 
 // Create SymCrypt key from EVP_PKEY (public key) -
-// relevant for public key operationssuch as "encrypt" and "verify"
+// relevant for public key operations such as "encrypt" and "verify"
 int _rsa_export_pubkey_to_symcrypt(const uuid_t correlationId, KEYISO_PROV_PKEY *provKey, PSYMCRYPT_RSAKEY *symcryptRsaKey)
 {
 	KEYISOP_trace_log(correlationId, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_PROVIDER_TITLE, "Start");
@@ -66,11 +66,11 @@ int _rsa_export_pubkey_to_symcrypt(const uuid_t correlationId, KEYISO_PROV_PKEY 
         return STATUS_FAILED;
     }
 
-    if ((modulusLen = KeyIso_get_bn_param_len(provKey, OSSL_PKEY_PARAM_RSA_N, &modulus)) == 0) {
+    if ((modulusLen = KeyIso_get_bn_param_len(provKey->pubKey, OSSL_PKEY_PARAM_RSA_N, &modulus)) == 0) {
         return _CLEANUP_RSA_EXPORT_PUBKEY_TO_SYMCRYPT(STATUS_FAILED, KeyIsoErrReason_FailedToGetParams);
     }
 
-    if ((exponentLen = KeyIso_get_bn_param_len(provKey, OSSL_PKEY_PARAM_RSA_E, &exponent)) == 0) {
+    if ((exponentLen = KeyIso_get_bn_param_len(provKey->pubKey, OSSL_PKEY_PARAM_RSA_E, &exponent)) == 0) {
         return _CLEANUP_RSA_EXPORT_PUBKEY_TO_SYMCRYPT(STATUS_FAILED, KeyIsoErrReason_FailedToGetParams);
     }
 
@@ -156,9 +156,9 @@ static int _rsa_encrypt(const uuid_t correlationId, KEYISO_PROV_RSA_CTX *ctx, PS
                 return ret;
             }
 
-            symCryptHashAlgo = KeyIso_get_symcrypt_hash_algorithm(ctx->mdInfo->id);
+            symCryptHashAlgo = KeyIso_get_symcrypt_hash_algorithm(ctx->mdInfoCtx->mdInfo->id);
             if (!symCryptHashAlgo) {
-                KMPPerr_para(KeyIsoErrReason_InvalidMsgDigest, "message digest identifier: %d", ctx->mdInfo->id);
+                KMPPerr_para(KeyIsoErrReason_InvalidMsgDigest, "message digest identifier: %d", ctx->mdInfoCtx->mdInfo->id);
                 return ret;
             }
 
@@ -265,7 +265,7 @@ static int _rsa_signatur_pkcs1_verify(const uuid_t correlationId, PSYMCRYPT_RSAK
    return STATUS_OK;
 }
 
-static int _rsa_signature_pss_verify(const uuid_t correlationId, KEYISO_PROV_RSA_CTX *ctx, PSYMCRYPT_RSAKEY pSymCryptRsaKey, int mdnid, 
+static int _rsa_signature_pss_verify(const uuid_t correlationId, KEYISO_PROV_RSA_MD_INFO_CTX *mdInfoCtx, PSYMCRYPT_RSAKEY pSymCryptRsaKey, int mdnid, 
     const unsigned char *hashValue, size_t hashValueLen, const unsigned char *sig, size_t sigLen)
 {
     SYMCRYPT_ERROR scError = SYMCRYPT_NO_ERROR;
@@ -293,25 +293,25 @@ static int _rsa_signature_pss_verify(const uuid_t correlationId, KEYISO_PROV_RSA
         return STATUS_FAILED;
     }
 
-    switch (ctx->saltLen) {
+    switch (mdInfoCtx->saltLen) {
         case KMPP_RSA_PSS_SALTLEN_DIGEST:
-            ctx->saltLen = expectedHashLength;
+            mdInfoCtx->saltLen = expectedHashLength;
             break;
         case KMPP_RSA_PSS_SALTLEN_MAX:
-            ctx->saltLen = (int32_t)saltMaxLen;
+            mdInfoCtx->saltLen = (int32_t)saltMaxLen;
             break;
         case KMPP_RSA_PSS_SALTLEN_AUTO:
         case KMPP_RSA_PSS_SALTLEN_AUTO_DIGEST_MAX:
-            ctx->saltLen = 0;
+            mdInfoCtx->saltLen = 0;
             flags = KEYISO_SYMCRYPT_FLAG_RSA_PSS_VERIFY_WITH_MINIMUM_SALT;
             break;
         default:
-            KMPPerr_para(KeyIsoErrReason_UnsupportedSaltLen, "saltLen: %d", ctx->saltLen);
+            KMPPerr_para(KeyIsoErrReason_UnsupportedSaltLen, "saltLen: %d", mdInfoCtx->saltLen);
             return STATUS_FAILED;
     }
 
-    if (ctx->saltLen < 0 || (uint32_t)ctx->saltLen > saltMaxLen) {
-        KMPPerr_para(KeyIsoErrReason_UnsupportedSaltLen, "saltLen: %d, saltMaxLen: %d", ctx->saltLen, saltMaxLen);
+    if (mdInfoCtx->saltLen < 0 || (uint32_t)mdInfoCtx->saltLen > saltMaxLen) {
+        KMPPerr_para(KeyIsoErrReason_UnsupportedSaltLen, "saltLen: %d, saltMaxLen: %d", mdInfoCtx->saltLen, saltMaxLen);
         return STATUS_FAILED;
     }
 
@@ -322,7 +322,7 @@ static int _rsa_signature_pss_verify(const uuid_t correlationId, KEYISO_PROV_RSA
     }
 
     scError = SymCryptRsaPssVerify(pSymCryptRsaKey, hashValue, hashValueLen, sig, sigLen, 
-        SYMCRYPT_NUMBER_FORMAT_MSB_FIRST, hashAlgo, ctx->saltLen, flags);
+        SYMCRYPT_NUMBER_FORMAT_MSB_FIRST, hashAlgo, mdInfoCtx->saltLen, flags);
 
     if (scError != SYMCRYPT_NO_ERROR) {
         KMPPerr_para(KeyIsoErrReason_OperationFailed, "SymCryptRsaPssVerify failed, scError: %d, flags: 0x%x", scError, pSymCryptRsaKey->fAlgorithmInfo);
@@ -340,7 +340,7 @@ int KeyIso_rsa_signature_verify(KEYISO_PROV_RSA_CTX *ctx, const unsigned char *s
     START_MEASURE_TIME();
 
     PSYMCRYPT_RSAKEY pSymCryptRsaKey = NULL;
-    int mdnid = (ctx->mdInfo == NULL) ? NID_undef : ctx->mdInfo->id;
+    int mdnid = (ctx->mdInfoCtx->mdInfo == NULL) ? NID_undef : ctx->mdInfoCtx->mdInfo->id;
 	int ret = STATUS_FAILED;
 
     if (!ctx || !ctx->provKey || !ctx->provKey->keyCtx) {
@@ -369,7 +369,7 @@ int KeyIso_rsa_signature_verify(KEYISO_PROV_RSA_CTX *ctx, const unsigned char *s
                 KMPPerr(KeyIsoErrReason_InvalidMsgDigest);
                 return STATUS_FAILED;
             }
-            ret = _rsa_signature_pss_verify(ctx->provKey->keyCtx->correlationId, ctx, pSymCryptRsaKey, mdnid, tbs, tbsLen, sig, sigLen);
+            ret = _rsa_signature_pss_verify(ctx->provKey->keyCtx->correlationId, ctx->mdInfoCtx, pSymCryptRsaKey, mdnid, tbs, tbsLen, sig, sigLen);
             break;
         default:
             KMPPerr(KeyIsoErrReason_UnsupportedPadding);

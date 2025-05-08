@@ -9,6 +9,7 @@
 #include "keyisolog.h"
 #include "keyisomemory.h"
 #include "keyisoutils.h"
+#include "keyisoservicecommon.h"
 #include "keyisoservicekeylist.h"
 
 #define KEYISO_MAX_SENDER_LEN 256 // == DBUS_MAXIMUM_NAME_LENGTH == NAME_MAX (which are not supported for TA compilation) +1 for NULL terminator
@@ -18,6 +19,8 @@
 ////////////////////////
 
 typedef struct KMPP_key_element_st KMPP_KEY_ELEMENT;
+// Initial capasity of the list
+static uint32_t s_capacity = 0; 
 struct KMPP_key_element_st {
     char             *sender;        // g_free()
     PKMPP_KEY        pkeyPtr;           // KeyIso_SERVER_free_key()
@@ -73,9 +76,9 @@ uint64_t KeyIso_add_key_to_list(
         if (KMPP_keyUseCount == KMPP_keyAllocCount) {
             KMPP_KEY_ELEMENT *newList = NULL;
             if (KMPP_keyList == NULL) {
-                newList = (KMPP_KEY_ELEMENT *) KeyIso_zalloc(sizeof(KMPP_KEY_ELEMENT) * g_keyCacheCapacity);
+                newList = (KMPP_KEY_ELEMENT *) KeyIso_zalloc(sizeof(KMPP_KEY_ELEMENT) * s_capacity);
                 if (newList != NULL) {
-                    KMPP_keyAllocCount = g_keyCacheCapacity;
+                    KMPP_keyAllocCount = s_capacity;
                 }
             } else {
                 size_t oldSize = 0;
@@ -265,4 +268,21 @@ void KeyIso_remove_sender_keys_from_list(
 
     KEYISOP_trace_log_para(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, title, "Remove",
         "removeCount: %d lastIndex: %d useCount: %d", removeCount, removeIndex, KMPP_keyUseCount);
+}
+
+void KeyIso_initialize_key_list(const uuid_t correlationId, uint32_t capacity)
+{
+    const char *title = KEYISOP_SERVICE_TITLE;
+    if (keyListFunctionTable.initLocks != NULL) {
+        keyListFunctionTable.initLocks();
+    } 
+    KEYISOP_trace_log_para(correlationId, 0, title, "Initialize key list", "initial capacity: %d", capacity);
+    s_capacity = capacity;
+}
+
+void KeyIso_clear_key_list(void)
+{
+    if (keyListFunctionTable.clearLocks != NULL) {
+        keyListFunctionTable.clearLocks();
+    } 
 }
