@@ -37,7 +37,6 @@ fi
 if [ "$openssl3" = "on" ] && [ "$generalLinux" = "on" ] && [ "$disableDefaultProvider" -eq 0 ]; then
     echo "KMPP is configured as default provider"
     echo "${defaultProviderCnfScript}"
-    sh ${defaultProviderCnfScript}/configure_kmpp_default_prov.sh
 else
     echo "KMPP is NOT configured as default provider"
 fi

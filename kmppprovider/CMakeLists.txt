@@ -186,22 +186,10 @@ if(KMPP_GENERAL_PURPOSE_TARGET)
     set(KMPP_DEFAULT_PROVIDER_CNF_SCRIPT_PATH "${KMPP_DEFAULT_PROVIDER_CNF_SCRIPT_PATH}" PARENT_SCOPE)
     message(STATUS "KMPP_DEFAULT_PROVIDER_CNF_SCRIPT_PATH: ${KMPP_DEFAULT_PROVIDER_CNF_SCRIPT_PATH}")
 
-    install(
-        FILES 
-            ${CMAKE_SOURCE_DIR}/scripts/configure_kmpp_default_prov.sh
-            ${CMAKE_SOURCE_DIR}/scripts/remove_kmpp_default_configuration.sh
-        DESTINATION ${KMPP_DEFAULT_PROVIDER_CNF_SCRIPT_PATH}
-        PERMISSIONS 
-            OWNER_READ OWNER_WRITE OWNER_EXECUTE
-            GROUP_READ GROUP_EXECUTE
-            WORLD_READ WORLD_EXECUTE
-        COMPONENT Runtime
-    )
 
     install(
         FILES 
-            ${CMAKE_SOURCE_DIR}/scripts/configure_kmpp_default_prov.sh
-            ${CMAKE_SOURCE_DIR}/scripts/remove_kmpp_default_configuration.sh
+            ${CMAKE_SOURCE_DIR}/scripts/
         DESTINATION ${KMPP_DEFAULT_PROVIDER_CNF_SCRIPT_PATH}
         PERMISSIONS 
             OWNER_READ OWNER_WRITE OWNER_EXECUTE
