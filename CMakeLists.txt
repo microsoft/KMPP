@@ -418,12 +418,19 @@ set(common_src
   kmpplib/serialization/keyisoipcprivatekeyserialization.c
 )
 
+if(KMPP_GENERAL_PURPOSE_TARGET)
+  list(APPEND common_src
+    kmpplib/keyisojsonutils.c
+  )
+endif()
 
 set(ossl_src
   ${common_src} 
   kmpplib/ossl/keyisomemory.c 
   kmpplib/keyisocommonossl.c
   kmpplib/keyisocert.c
+  kmpplib/keyisopbe.c
+  kmpplib/keyisopkcs12.c
 )
 
 # Client side sources
@@ -431,10 +438,8 @@ set(kmpp_src
   ${ossl_src} 
   kmppclient/keyisoclientinit.c
   kmppclient/keyisoclient.c
-  kmppclient/keyisoclientpbe.c
   kmppclient/keyisoclientmsghandler.c
   kmppclient/keyisoclientpkcs8.c
-  kmppclient/keyisoclientpkcs12.c
   kmppclient/keyisoctrlclient.c
   kmppclient/keyisoipcclientadapter.c
   kmppclient/kmppipcutils.c
