@@ -188,7 +188,7 @@ if(KMPP_GENERAL_PURPOSE_TARGET)
 
 
     install(
-        FILES 
+        DIRECTORY 
             ${CMAKE_SOURCE_DIR}/scripts/
         DESTINATION ${KMPP_DEFAULT_PROVIDER_CNF_SCRIPT_PATH}
         PERMISSIONS 
