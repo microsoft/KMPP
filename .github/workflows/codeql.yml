@@ -63,20 +63,26 @@ jobs:
     - name: Build KMPP C# code
       if: ${{ matrix.language == 'csharp' }}
       run: |
-            if [ -d "tools/DotNetKMPP" ]; then
-              cd tools/DotNetKMPP
-              # Check if there's a project file
-              if [ -f "*.csproj" ]; then
-                dotnet build
-              else
-                # If no project file, create a temporary one to help CodeQL analyze the code
-                dotnet new classlib --no-restore
-                dotnet add package Microsoft.Extensions.Logging --version 6.0.0
-                dotnet add package Microsoft.Extensions.Logging.Abstractions --version 6.0.0
-                dotnet add package Microsoft.Extensions.Logging.Console --version 6.0.0
-                dotnet build
-              fi
-            fi
+        if [ -d "tools/DotNetKMPP" ]; then
+          cd tools/DotNetKMPP
+          # Check if there's a project file (fix the check to look for any .csproj file)
+          if compgen -G "*.csproj" > /dev/null; then
+            echo "Found project file, building with existing project"
+            dotnet build --configuration Release
+          else
+            echo "No project file found, creating a temporary project"
+            # Create a temporary project file with force flag to overwrite if needed
+            dotnet new classlib --output . --force
+            # Add required packages
+            dotnet add package Microsoft.Extensions.Logging --version 6.0.0
+            dotnet add package Microsoft.Extensions.Logging.Abstractions --version 6.0.0
+            dotnet add package Microsoft.Extensions.Logging.Console --version 6.0.0
+            # Build the project
+            dotnet build --configuration Release
+          fi
+        else
+          echo "DotNetKMPP directory not found"
+        fi
 
     # Custom build steps for C++ code
     - name: Build KMPP C/C++ code
