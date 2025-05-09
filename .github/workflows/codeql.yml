@@ -28,17 +28,15 @@ jobs:
 
     - name: Install dependencies
       run: |
-            
-            sudo apt-get update
-            sudo apt-get install -y \
-                build-essential pkg-config \
-                libssl-dev libcurl4-openssl-dev uuid-dev \
-                libglib2.0-dev libgirepository1.0-dev \
-                libdbus-1-dev libjansson-dev
-
-            sudo apt-get install -y \
-                libtss2-dev \
-                libtss2-tcti-tabrmd-dev
+          sudo apt-get update
+          sudo apt-get install -y pkg-config cmake libcurl4-openssl-dev libglib2.0-dev libgtest-dev libdbus-1-dev uuid-dev libssl-dev build-essential googletest libtss2-dev libjansson-dev
+          curl -sSL -O https://packages.microsoft.com/config/ubuntu/20.04/packages-microsoft-prod.deb
+          sudo dpkg -i packages-microsoft-prod.deb 
+          sudo rm packages-microsoft-prod.deb 
+          sudo apt-get update 
+          echo "deb https://packages.microsoft.com/ubuntu/20.04/prod testing main" | sudo tee /etc/apt/sources.list.d/microsoft-test.list 
+          sudo apt-get update 
+          sudo apt install -y symcrypt 
 
     - name: Initialize CodeQL
       uses: github/codeql-action/init@v2
@@ -52,12 +50,13 @@ jobs:
     # Instead of using the autobuild action, we'll use custom build steps
     - name: Build KMPP
       run: |
-        mkdir -p build
-        cd build
-        # Configure with appropriate options
-        cmake .. -DKMPP_GENERAL_PURPOSE_TARGET=ON -DKMPP_OPENSSL_SUPPORT=ON -DKMPP_SYMMETRIC_KEY_SUPPORT=ON
-        # Build the project
-        make -j$(nproc)
+            ./scripts/create_certs.sh
+            cmake -S . -B build -DKMPP_DEBUG=ON
+            cmake --build build
+            chmod +x scripts/postinst scripts/preinst
+            sh scripts/preinst
+            sudo make install -C build
+            sudo sh scripts/postinst
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v2
