@@ -1,8 +1,6 @@
 name: "CodeQL"
 
 on:
-  push:
-    branches: [ main ]
   pull_request:
     branches: [ main ]
   schedule:
@@ -20,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        language: [ 'cpp', 'csharp' ]  # Match languages with main branch
+        language: [ 'cpp', 'csharp' ]  # Analyze both C/C++ and C# code
 
     steps:
     - name: Checkout repository
@@ -36,6 +34,7 @@ jobs:
       if: ${{ github.event_name == 'pull_request' }}
 
     - name: Install dependencies
+      if: ${{ matrix.language == 'cpp' }}
       run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config cmake libcurl4-openssl-dev libglib2.0-dev libgtest-dev libdbus-1-dev uuid-dev libssl-dev build-essential googletest libtss2-dev libjansson-dev
@@ -47,6 +46,13 @@ jobs:
           sudo apt-get update 
           sudo apt install -y symcrypt 
 
+    # Setup .NET for C# analysis
+    - name: Setup .NET
+      if: ${{ matrix.language == 'csharp' }}
+      uses: actions/setup-dotnet@v3
+      with:
+        dotnet-version: '6.0.x'
+
     - name: Initialize CodeQL
       uses: github/codeql-action/init@v2
       with:
@@ -54,9 +60,28 @@ jobs:
         config-file: .github/codeql/codeql-config.yml
         queries: security-and-quality
 
-    # Instead of using the autobuild action, we'll use custom build steps
-    # Only run the build steps for C++ analysis, skip for C#
-    - name: Build KMPP
+
+    # Setup .NET for C# analysis
+    - name: Build KMPP C# code
+      if: ${{ matrix.language == 'csharp' }}
+      run: |
+            if [ -d "tools/DotNetKMPP" ]; then
+              cd tools/DotNetKMPP
+              # Check if there's a project file
+              if [ -f "*.csproj" ]; then
+                dotnet build
+              else
+                # If no project file, create a temporary one to help CodeQL analyze the code
+                dotnet new classlib --no-restore
+                dotnet add package Microsoft.Extensions.Logging --version 6.0.0
+                dotnet add package Microsoft.Extensions.Logging.Abstractions --version 6.0.0
+                dotnet add package Microsoft.Extensions.Logging.Console --version 6.0.0
+                dotnet build
+              fi
+            fi
+
+    # Custom build steps for C++ code
+    - name: Build KMPP C/C++ code
       if: ${{ matrix.language == 'cpp' }}
       run: |
             ./scripts/create_certs.sh

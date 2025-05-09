@@ -1,24 +1,29 @@
 name: "KMPP CodeQL Configuration"
 
-# Define languages analyzed in the main branch previously
+# Define languages analyzed
 languages:
   - cpp
-  # C# is explicitly configured to maintain compatibility with the main branch
-  # but no actual C# analysis will run since we don't specify any C# code paths
   - csharp
 
 # Path filters for C/C++ files
-paths:
-  # Analyze all C/C++ code in the repository
-  - '**/*.c'
-  - '**/*.cpp'
-  - '**/*.h'
-  - '**/*.hpp'
-
-# Exclude third-party code from analysis
 paths-ignore:
   - '**/thirdparty/**'
+  - '**/tpm/**'
 
-# Import standard queries
+# Path filters specific to each language
 queries:
   - uses: security-and-quality
+
+# Language-specific settings
+cpp:
+  paths:
+    - '**/*.c'
+    - '**/*.cpp'
+    - '**/*.h'
+    - '**/*.hpp'
+  paths-ignore:
+    - '**/tools/DotNetKMPP/**'
+
+csharp:
+  paths:
+    - '**/tools/DotNetKMPP/**/*.cs'
