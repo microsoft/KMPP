@@ -28,9 +28,17 @@ jobs:
 
     - name: Install dependencies
       run: |
-        sudo apt-get update
-        sudo apt-get install -y libssl-dev libcurl4-openssl-dev uuid-dev libglib2.0-dev libgio-cil-dev libdbus-1-dev libjansson-dev pkg-config
-        sudo apt-get install -y libtss2-dev libtss2-esys-dev libtss2-rc0-dev libtss2-tcti-dev
+            
+            sudo apt-get update
+            sudo apt-get install -y \
+                build-essential pkg-config \
+                libssl-dev libcurl4-openssl-dev uuid-dev \
+                libglib2.0-dev libgirepository1.0-dev \
+                libdbus-1-dev libjansson-dev
+
+            sudo apt-get install -y \
+                libtss2-dev \
+                libtss2-tcti-tabrmd-dev
 
     - name: Initialize CodeQL
       uses: github/codeql-action/init@v2
