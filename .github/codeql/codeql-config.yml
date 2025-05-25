@@ -4,6 +4,7 @@ name: "KMPP CodeQL Configuration"
 languages:
   - cpp
   - csharp
+  - c
 
 # Path filters for C/C++ files
 paths-ignore:

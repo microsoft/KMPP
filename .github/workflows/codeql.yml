@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        language: [ 'cpp', 'csharp' ]  # Match languages with main branch
+        language: [ 'cpp', 'csharp', 'c']  # Match languages with main branch
 
     steps:
     - name: Checkout repository
