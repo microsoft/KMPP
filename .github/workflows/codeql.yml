@@ -32,7 +32,7 @@ jobs:
       if: ${{ github.event_name == 'pull_request' }}
 
     - name: Install dependencies
-      if: ${{ matrix.language == 'cpp' }}
+      if: ${{ matrix.language == 'cpp' || matrix.language == 'c' }}
       run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config cmake libcurl4-openssl-dev libglib2.0-dev libgtest-dev libdbus-1-dev uuid-dev libssl-dev build-essential googletest libtss2-dev libjansson-dev
@@ -86,15 +86,28 @@ jobs:
 
     # Custom build steps for C++ code
     - name: Build KMPP C/C++ code
-      if: ${{ matrix.language == 'cpp' }}
+      if: ${{ matrix.language == 'cpp' || matrix.language == 'c' }}
       run: |
-            ./scripts/create_certs.sh
-            cmake -S . -B build -DKMPP_DEBUG=ON
-            cmake --build build
-            chmod +x scripts/postinst scripts/preinst
-            sh scripts/preinst
-            sudo make install -C build
-            sudo sh scripts/postinst
+        # Ensure build directory is clean
+        rm -rf build
+        
+        # Run certificate creation script
+        ./scripts/create_certs.sh
+        
+        # Configure with verbose output for CodeQL
+        cmake -S . -B build -DKMPP_DEBUG=ON -DCMAKE_VERBOSE_MAKEFILE=ON
+        
+        # Build with verbose output
+        cmake --build build --verbose
+        
+        # Make scripts executable
+        chmod +x scripts/postinst scripts/preinst
+        
+        # Run pre-install script
+        sh scripts/preinst
+        
+        # Install but don't run post-install during analysis
+        sudo make install -C build
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v3
