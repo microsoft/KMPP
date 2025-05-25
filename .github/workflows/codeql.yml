@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        language: [ 'cpp', 'csharp', 'c']  # Match languages with main branch
+        language: [ 'c-cpp', 'csharp' ]  # Use 'c-cpp' instead of separate 'cpp' and 'c'
 
     steps:
     - name: Checkout repository
@@ -32,7 +32,7 @@ jobs:
       if: ${{ github.event_name == 'pull_request' }}
 
     - name: Install dependencies
-      if: ${{ matrix.language == 'cpp' || matrix.language == 'c' }}
+      if: ${{ matrix.language == 'c-cpp' }}
       run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config cmake libcurl4-openssl-dev libglib2.0-dev libgtest-dev libdbus-1-dev uuid-dev libssl-dev build-essential googletest libtss2-dev libjansson-dev
@@ -86,7 +86,7 @@ jobs:
 
     # Custom build steps for C++ code
     - name: Build KMPP C/C++ code
-      if: ${{ matrix.language == 'cpp' || matrix.language == 'c' }}
+      if: ${{ matrix.language == 'c-cpp' }}
       run: |
         # Ensure build directory is clean
         rm -rf build
