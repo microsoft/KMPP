@@ -1,3 +1,7 @@
+ # Copyright (c) Microsoft Corporation.
+ # Licensed under the MIT License
+
+
 # The KMPP default provider must be registered with libcrypto.
 # Unlike the KMPP provider, it is not intended to be loaded explicitly
 # if configured as the default provider.

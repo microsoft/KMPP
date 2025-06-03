@@ -1,3 +1,7 @@
+ # Copyright (c) Microsoft Corporation.
+ # Licensed under the MIT License
+
+
 # The KMPP provider needs to be registered with libcrypto,
 # either by config or with OSSL_PROVIDER_load. The provider can
 # be disabled by commenting out or removing "activate = 1". The

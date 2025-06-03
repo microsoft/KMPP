@@ -1,4 +1,7 @@
+ # Copyright (c) Microsoft Corporation.
+ # Licensed under the MIT License
 
+ 
 # The following is a snippet of OpenSSL configuration file.
 # This includes only the relevant modified configuration for KMPP as the default provider.
 # This configuration file is taken from AZL 3.0 VM and includes symcrypt provider 
