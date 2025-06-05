@@ -13,6 +13,7 @@
 
 #include "keyisolog.h"
 #include "keyisocommon.h"
+#include "keyisomemory.h"
 #include "keyisoutils.h"
 
 #define KEYISOP_ONE_HOUR_SECONDS     (60 * 60)
@@ -36,6 +37,80 @@ static STACK_OF(CONF_VALUE) *_conf_get_section(
 
     return values;
 }
+
+// Helper struct to define a field name and its new value
+typedef struct {
+    const char *name;  // Field name to update
+    const char *value; // New value to set
+} KeyIsoFieldUpdate;
+
+static int _edit_conf_section(
+    const uuid_t correlationId,
+    CONF *conf,
+    const char *section_name,
+    const KeyIsoFieldUpdate *updates,
+    size_t update_count)
+{
+    const char *title = KEYISOP_CREATE_SELF_SIGN_TITLE;
+    STACK_OF(CONF_VALUE) *values = _conf_get_section(correlationId, conf, section_name);
+    if (values == NULL) {
+        KEYISOP_trace_log_openssl_error(correlationId, 0, title, "NCONF_get_section");
+        return STATUS_FAILED;
+    }
+    
+    for (int i = 0; i < sk_CONF_VALUE_num(values); i++) {
+        CONF_VALUE *value = sk_CONF_VALUE_value(values, i);
+        if (value == NULL) {
+            KEYISOP_trace_log_openssl_error(correlationId, 0, title, "sk_CONF_VALUE_value");
+            return STATUS_FAILED;
+        }
+        
+        // Look for this field in our update list
+        for (size_t j = 0; j < update_count; j++) {
+            if (strncmp(value->name, updates[j].name, strlen(updates[j].name)) == 0) {
+                // Create a new copy of the update value
+                char *new_value = OPENSSL_strdup(updates[j].value);
+                if (new_value == NULL) {
+                    KEYISOP_trace_log_openssl_error(correlationId, 0, title, "OPENSSL_strdup");
+                    return STATUS_FAILED;
+                }
+                
+                // Free the existing value if it exists
+                if (value->value != NULL) {
+                    OPENSSL_free(value->value);
+                }
+                
+                // Set the new value
+                value->value = new_value;
+                break;
+            }
+        }
+    }
+    
+    return STATUS_OK;
+}
+
+int KeyIso_edit_alt_names_section(
+    const uuid_t correlationId,
+    CONF *conf,
+    const char *dns1,
+    const char *dns2)
+{
+    if (dns1 == NULL || dns2 == NULL) {
+        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_CREATE_SELF_SIGN_TITLE, "dns1 or dns2", "NULL");
+        return STATUS_FAILED;
+    }
+    
+    // Define the updates we want to make
+    const KeyIsoFieldUpdate updates[] = {
+        {"DNS.1", dns1},  
+        {"DNS.2", dns2}
+    };
+
+    // Use our generic function to update the alt_names section
+    return _edit_conf_section(correlationId, conf, "alt_names", updates, sizeof(updates)/sizeof(updates[0]));
+}
+
 
 // Helper function for PCKS#12 creation
 // Returns BIO_s_mem().
@@ -201,7 +276,7 @@ end:
 openSslErr:
     KEYISOP_trace_log_openssl_error(correlationId, 0, title, loc);
     goto end;
-}
+}              
 
 int KeyIso_conf_load(
     const uuid_t correlationId,
@@ -213,36 +288,28 @@ int KeyIso_conf_load(
     long errorLine = -1;
     int ret = 0;
     BIO *in = NULL;
-
     ERR_clear_error();
-
     *conf = NCONF_new(NULL);
     if (*conf == NULL) {
         goto openSslErr;
     }
-
     in = BIO_new_mem_buf(confStr, (int) strlen(confStr));
     if (in == NULL) {
         goto openSslErr;
     }
-
     if (!NCONF_load_bio(*conf, in, &errorLine)) {
         loc = "NCONF_load_bio";
         goto openSslErr;
     }
-
     ret = 1;
-
 end:
     BIO_free(in);
     if (!ret) {
         NCONF_free(*conf);
         *conf = NULL;
     }
-
     ERR_clear_error();
     return ret;
-
 openSslErr:
     KEYISOP_trace_log_openssl_error_para(correlationId, 0, title, loc,
         "errorLine: %ld", errorLine);
@@ -335,75 +402,132 @@ int KeyIso_conf_get_curve_nid(
     return STATUS_OK;
 }
 
+#ifdef KMPP_OPENSSL_3
+static EVP_PKEY* _cleanup_rsa_key_ossl_3(int ret, const char *loc, const uuid_t correlationId, EVP_PKEY *pKey, EVP_PKEY_CTX *ctx, BIGNUM *bn) 
+{
+    if(ret != STATUS_OK)
+        KEYISOP_trace_log_openssl_error(correlationId, 0, KEYISOP_CREATE_SELF_SIGN_TITLE, loc);
+
+    if (bn != NULL) {
+        BN_free(bn);
+    }
+    if (ctx != NULL) {
+        EVP_PKEY_CTX_free(ctx);
+    }
+    return pKey;
+}
+#define _CLEANUP_RSA_GENERATE_RSA_KEY_OSSL_3(ret, loc) \
+    _cleanup_rsa_key_ossl_3(ret, loc, correlationId, pKey, ctx, bn)
+
+static EVP_PKEY* _generate_rsa_key_ossl_3(const uuid_t correlationId, long rsaBits, long rsaExp) 
+{
+    EVP_PKEY *pKey = NULL;
+    EVP_PKEY_CTX *ctx = NULL;
+    BIGNUM *bn = NULL;
+
+    ctx = EVP_PKEY_CTX_new_from_name(NULL, "RSA", "provider=default");
+    if (ctx == NULL) {
+        return _CLEANUP_RSA_GENERATE_RSA_KEY_OSSL_3(STATUS_FAILED, "EVP_PKEY_CTX_new_from_name");
+    }
+
+    if (EVP_PKEY_keygen_init(ctx) <= 0) {
+        return _CLEANUP_RSA_GENERATE_RSA_KEY_OSSL_3(STATUS_FAILED, "EVP_PKEY_keygen_init");
+    }
+
+    if (EVP_PKEY_CTX_set_rsa_keygen_bits(ctx, (int) rsaBits) <= 0) {
+        return _CLEANUP_RSA_GENERATE_RSA_KEY_OSSL_3(STATUS_FAILED, "EVP_PKEY_CTX_set_rsa_keygen_bits");
+    }
+
+    bn = BN_new();
+    if (bn == NULL || !BN_set_word(bn, (BN_ULONG) rsaExp)) {
+        return _CLEANUP_RSA_GENERATE_RSA_KEY_OSSL_3(STATUS_FAILED, "BN_set_word");
+    }
+
+    if (EVP_PKEY_CTX_set1_rsa_keygen_pubexp(ctx, bn) <= 0) {
+        return _CLEANUP_RSA_GENERATE_RSA_KEY_OSSL_3(STATUS_FAILED, "EVP_PKEY_CTX_set1_rsa_keygen_pubexp");
+    }
+
+    if (EVP_PKEY_keygen(ctx, &pKey) <= 0) {
+        return _CLEANUP_RSA_GENERATE_RSA_KEY_OSSL_3(STATUS_FAILED, "EVP_PKEY_keygen");
+    }
+
+    return _CLEANUP_RSA_GENERATE_RSA_KEY_OSSL_3(STATUS_OK, "");
+}
+#else // NOT KMPP_OPENSSL_3
+static EVP_PKEY* _cleanup_rsa_key_ossl_1(int ret, const char *loc, const uuid_t correlationId, EVP_PKEY *pKey, RSA *rsa, BIGNUM *bn) 
+{
+    if(ret != STATUS_OK)
+        KEYISOP_trace_log_openssl_error(correlationId, 0, KEYISOP_CREATE_SELF_SIGN_TITLE, loc);
+
+    if (rsa != NULL) {
+        RSA_free(rsa);
+    }
+    if (bn != NULL) {
+        BN_free(bn);
+    }
+
+    return pKey;
+}
+#define _CLEANUP_RSA_GENERATE_RSA_KEY_OSSL_1(ret, loc) \
+    _cleanup_rsa_key_ossl_1(ret, loc, correlationId, pKey, rsa, bn)
+
+static EVP_PKEY* _generate_rsa_key_ossl_1(const uuid_t correlationId, long rsaBits, long rsaExp) 
+{
+    EVP_PKEY *pKey = NULL;
+    RSA *rsa = NULL;
+    BIGNUM *bn = NULL;
+
+    rsa = RSA_new();
+    bn = BN_new();
+    pKey = EVP_PKEY_new();
+    if (rsa == NULL || bn == NULL || pKey == NULL) {
+        return _CLEANUP_RSA_GENERATE_RSA_KEY_OSSL_1(STATUS_FAILED, "RSA_new or BN_new or EVP_PKEY_new");
+    }
+
+    if (!BN_set_word(bn, (BN_ULONG) rsaExp)) {
+        return _CLEANUP_RSA_GENERATE_RSA_KEY_OSSL_1(STATUS_FAILED, "BN_set_word");
+    }
+
+    if (!RSA_generate_key_ex(rsa, (int) rsaBits, bn, NULL)) {
+        return _CLEANUP_RSA_GENERATE_RSA_KEY_OSSL_1(STATUS_FAILED, "RSA_generate_key_ex");
+    }
+
+    if (!EVP_PKEY_assign_RSA(pKey, rsa)) {
+        return _CLEANUP_RSA_GENERATE_RSA_KEY_OSSL_1(STATUS_FAILED, "EVP_PKEY_assign_RSA");
+    }
+    rsa = NULL;
+
+    return _CLEANUP_RSA_GENERATE_RSA_KEY_OSSL_1(STATUS_OK, "");
+}
+#endif // KMPP_OPENSSL_3
+
 EVP_PKEY *KeyIso_conf_generate_rsa(
     const uuid_t correlationId,
     const CONF *conf)
 {
-    const char *title = KEYISOP_CREATE_SELF_SIGN_TITLE;
-    const char *loc = "";
-    int ret = 0;
-    EVP_PKEY *pkey = NULL;
+    EVP_PKEY *pKey = NULL;
     long rsaBits = 0;
     long rsaExp = 0;
-    RSA *rsa = NULL;
-    BIGNUM *bn = NULL;
 
     if (!KeyIso_conf_get_number(correlationId, conf, "rsa_bits", &rsaBits) ||
         !KeyIso_conf_get_number(correlationId, conf, "rsa_exp", &rsaExp) ||
         rsaBits <= 0 ||
         rsaExp <= 0) {
-            goto end;
+        return NULL;
     }
 
     if (rsaBits > KMPP_OPENSSL_RSA_MAX_MODULUS_BITS || rsaBits < KMPP_RSA_MIN_MODULUS_BITS) {
-        KEYISOP_trace_log_error_para(correlationId, 0, title, "rsa_bits", "Invalid length",
-            "rsa_bits: %ld", rsaBits);
-        goto end;
+        KEYISOP_trace_log_error_para(correlationId, 0, KEYISOP_CREATE_SELF_SIGN_TITLE, "rsa_bits", "Invalid length", "rsa_bits: %ld", rsaBits);
+        return NULL;
     }
 
-    rsa = RSA_new();
-    bn = BN_new();
-    pkey = EVP_PKEY_new();
-    if (rsa == NULL || bn == NULL || pkey == NULL) {
-        goto openSslErr;
-    }
+#ifdef KMPP_OPENSSL_3
+    pKey = _generate_rsa_key_ossl_3(correlationId, rsaBits, rsaExp);
+#else
+    pKey = _generate_rsa_key_ossl_1(correlationId, rsaBits, rsaExp);
+#endif
 
-    if (!BN_set_word(bn, (BN_ULONG) rsaExp)) {
-        loc = "BN_set_exp";
-        goto openSslErr;
-    }
-
-    if (!RSA_generate_key_ex(
-            rsa,
-            (int) rsaBits,
-            bn,
-            NULL)) {            // BN_GENCB *cb
-        loc = "RSA_generate_key_ex";
-        goto openSslErr;
-    }
-
-    // The assign takes the rsa refCount
-    if (!EVP_PKEY_assign_RSA(pkey, rsa)) {
-        loc = "EVP_PKEY_assign_RSA";
-        goto openSslErr;
-    }
-    rsa = NULL;
-
-    ret = 1;
-
-end:
-    if (!ret) {
-        EVP_PKEY_free(pkey);
-        pkey = NULL;
-    }
-
-    RSA_free(rsa);
-    BN_free(bn);
-    return pkey;
-
-openSslErr:
-    KEYISOP_trace_log_openssl_error(correlationId, 0, title, loc);
-    goto end;
+    return pKey;
 }
 
 EVP_PKEY *KeyIso_conf_generate_ecc(
@@ -587,6 +711,7 @@ openSslErr:
     KEYISOP_trace_log_openssl_error(correlationId, 0, title, loc);
     goto end;
 }
+
 int KeyIso_conf_get_time(
     const uuid_t correlationId,
     const CONF *conf,
@@ -710,6 +835,44 @@ void KeyIsoP_X509_pubkey_sha256_hex_hash(
         KEYISOP_trace_log_error(NULL, 0, KEYISOP_SUPPORT_TITLE, "KeyIsoP_bytes_to_hex", "Hash is NULL");
 }
 
+void KeyIso_pkey_sha256_hex_hash(
+    EVP_PKEY *pkey,
+    char *hexHash)
+{
+    const char *title = KEYISOP_SUPPORT_TITLE;
+    unsigned char md[SHA256_DIGEST_LENGTH];
+    unsigned char *buf = NULL;
+    int len = 0;
+
+    if (!pkey || !hexHash) {
+        KEYISOP_trace_log_error(NULL, 0, title, "Invalid argument", "pkey or hexHash is NULL");
+        return;
+    }
+
+    // Extract the public key in DER format
+    if ((len = i2d_PUBKEY(pkey, &buf)) <= 0) {
+        KEYISOP_trace_log_openssl_error(NULL, 0, title, "i2d_PUBKEY");
+        KeyIso_free(buf);
+        return;
+    }
+
+    // Compute the SHA-256 hash of the public key
+    if (!EVP_Digest(buf, len, md, NULL, EVP_sha256(), NULL)) {
+        KEYISOP_trace_log_openssl_error(NULL, 0, title, "EVP_Digest");
+        KeyIso_free(buf);
+        return;
+    }
+
+    // Convert the hash to a hexadecimal string
+    KeyIsoP_bytes_to_hex(sizeof(md), md, hexHash);
+
+    if (!hexHash) {
+        KEYISOP_trace_log_error(NULL, 0, title, "KeyIsoP_bytes_to_hex", "Hash is NULL");
+    }
+
+    // Clean up
+    KeyIso_free(buf);
+}
 
 static int _cleanup_get_ec_evp_key(
     const uuid_t correlationId,

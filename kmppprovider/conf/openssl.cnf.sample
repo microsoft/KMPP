@@ -1,0 +1,35 @@
+ # Copyright (c) Microsoft Corporation.
+ # Licensed under the MIT License
+
+ 
+# The following is a snippet of OpenSSL configuration file.
+# This includes only the relevant modified configuration for KMPP as the default provider.
+# This configuration file is taken from AZL 3.0 VM and includes symcrypt provider 
+# which is mandatory for AZL 3.0 but optional also for ubuntu
+
+
+
+# Use this in order to automatically load providers.
+openssl_conf = openssl_init
+
+[openssl_init]
+alg_section = evp_settings
+providers = provider_sect
+.include = /etc/pki/tls/symcrypt_prov.cnf   # symcrypt_prov.cnf is optional for ubuntu, mandatoru for AZL 3.0
+.include = /etc/pki/tls/kmpp_dflt_prov.cnf
+
+# Use the KMPP provider by default, if available
+[evp_settings]
+default_properties = "?provider=kmppprovider_dflt"
+
+[provider_sect]
+kmppprovider_dflt = kmppprovider_dflt_sect
+symcryptprovider = symcrypt_prov_sect   # optional for ubuntu, mandatoru for AZL 3.0
+default = default_sect
+##legacy = legacy_sect
+
+[default_sect]
+activate = 1
+
+##[legacy_sect]
+##activate = 1

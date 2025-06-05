@@ -5,12 +5,12 @@ The Key Material Protection Platform (KMPP) is designed to safeguard TLS keys in
 ## Prerequisites
 - OpenSSL	version 1.1.1 or 3.0.2 <br>
 - SymCrypt - Microsoft core cryptographic library <br>
-- TSS - TPM2 Software Stack (already installed in Azure Linux 2.0) 
+- TSS - TPM2 Software Stack (already installed in Azure Linux 3.0) 
 
 ## Supported Linux Operating Systems
-- Azure Linux 2.0 <br>
-- Ubuntu 20.04 <br>
-- Ubuntu 22.04 <br> 
+- Azure Linux 3.0 <br>
+- Ubuntu 22.04 <br>
+- Ubuntu 24.04 <br> 
 
 ## Building
 
@@ -40,6 +40,40 @@ You can run the script with the `--help` argument to get detailed information ab
    ```bash
    ./scripts/build.sh
    ```
+
+### KMPP Provider
+
+The default KMPP provider configuration will be
+automatically set as part of the postinst script unless explicitly disabled by the admin by creating an empty file as follows:
+
+```
+touch /etc/kmpp/disableDefaultProvider 
+
+```
+This file indicates the installation of KMPP without default configuration.  
+It is the admin's responsibility to create and remove the file.<br><br>
+
+In the default case, KMPP is configured as the default provider during the installation process 
+when changes are made to the openssl.cnf file, with a backup file created for use in case of uninstallation. <br>  
+NOTE: This backup file should not be removed or edited. <br>
+
+In order to use the KMPP provider as the default provider, follow these steps:<br>  
+1. Enable the KMPP provider in the config.cnf file located at /var/opt/msft/ap/data/kmpp/config.cnf. <br>A template can be found at /usr/share/kmpp/. <br> 
+2. Add the applications that the KMPP default provider will support in a file located at /var/opt/msft/ap/data/kmpp/kmpp_apps.json.<br>
+
+   The file should have the following structure:
+
+ ```
+{
+    "allowed_apps": [
+        "app1",
+        "app2",
+        "app3"
+    ]
+} 
+```
+
+If all applications should be supported, the admin can simply write "ALL".
 
 ### Notes:
 - Ensure that the `scripts/build.sh` script is executable. If it's not, you can make it executable using:

@@ -18,11 +18,6 @@
 
 KeyIso_get_machine_secret_func_ptr KeyIso_get_machine_secret_func;
 
-// The gdbus service can configure this value by dbus config but the lru cache/key list and common are compiled to service lib(to be used for optee or inproc tests)
-// It is defines in service lib header as extern, set to default value for code linking to srvlib with default hash size
-uint32_t g_keyCacheCapacity = KEYISO_KEY_DEFAULT_HASH_SIZE;
-
-
 int KeyIso_set_machine_secret_method(
     const uuid_t correlationId,
     KeyIso_get_machine_secret_func_ptr getMachineSecretFunc)

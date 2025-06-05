@@ -105,8 +105,10 @@ PKCS12 *KeyIso_pkcs12_create_p8(
         if (!X509_check_private_key(cert, pkey))
             return NULL;*/
 
-        if (!X509_digest(cert, EVP_sha1(), keyid, &keyidlen))
-            return NULL;
+        if (!X509_digest(cert, EVP_sha1(), keyid, &keyidlen)) {
+			KEYISOP_trace_log_openssl_error(NULL, 0, KEYISOP_IMPORT_PFX_TITLE, "X509_digest");
+			return NULL;
+        }      
 
         char *name = (char *)X509_alias_get0(cert, &namelen);
         if (keyidlen > 0) {
@@ -120,9 +122,11 @@ PKCS12 *KeyIso_pkcs12_create_p8(
     }
 
     /* Add all other certificates */
-    for (i = 0; i < sk_X509_num(ca); i++) {
-        if (!PKCS12_add_cert(&bags, sk_X509_value(ca, i)))
-            goto err;
+    if (ca) {
+        for (i = 0; i < sk_X509_num(ca); i++) {
+            if (!PKCS12_add_cert(&bags, sk_X509_value(ca, i)))
+                goto err;
+        }
     }
 
     if (bags && !PKCS12_add_safe(&safes, bags, -1, PKCS12_DEFAULT_ITER, NULL))

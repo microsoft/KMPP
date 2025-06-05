@@ -71,7 +71,8 @@ typedef enum {
 typedef struct keyiso_client_config_st KEYISO_CLIENT_CONFIG_ST;
 struct keyiso_client_config_st {
     KeyIsoSolutionType solutionType;
-    bool isDefault;
+    bool isDefaultSolutionType;
+    bool isKmppEnabledByDefault;
 #ifdef KMPP_GENERAL_PURPOSE_TARGET
     KEYISO_TPM_CONFIG_ST tpmConfig;
 #endif  // KMPP_GENERAL_PURPOSE_TARGET
@@ -140,13 +141,23 @@ int KeyIso_CLIENT_import_private_key(
     X509_SIG **outEncryptedPkey,
     char **outSalt);
 
-int KeyIso_CLIENT_generate_rsa_key_pair( 
+int KeyIso_CLIENT_generate_rsa_key_pair_conf( 
     const uuid_t correlationId,
     int keyisoFlags, 
     const CONF *conf,
     EVP_PKEY **outPubKey, 
     X509_SIG **outEncryptedPkey,
     char **outSalt);
+
+int KeyIso_CLIENT_generate_rsa_key_pair(
+    const uuid_t correlationId,
+    unsigned int rsaBits,
+    uint8_t keyUsage,
+    uint64_t pubExp64,
+    uint32_t nPubExp,
+    EVP_PKEY** pubEpkey,
+    X509_SIG** encryptedPkey,
+    char** salt);
 
 int KeyIso_CLIENT_generate_ec_key_pair( 
     const uuid_t correlationId,
@@ -178,6 +189,13 @@ int KeyIso_CLIENT_create_self_sign_pfx_p8(
     unsigned char **pfxBytes,
     char **pfxSalt);
 
+int KeyIso_CLIENT_create_X509_from_pubkey(
+    const uuid_t correlationId,
+    int keyType,
+    EVP_PKEY *pubKey,
+    X509 **cert,
+    CONF *conf);
+
 int KeyIso_replace_pfx_certs_p8(
     const uuid_t correlationId,
     int keyisoFlags,
@@ -188,13 +206,13 @@ int KeyIso_replace_pfx_certs_p8(
     int *outPfxLength,
     unsigned char **outPfxBytes);
 
-int KeyIso_pkcs12_parse_p8(
+int KeyIso_create_encrypted_pfx_bytes(
     const uuid_t correlationId,
-    int inPfxLength,
-    const unsigned char *inPfxBytes,
-    X509_SIG **outP8,
-    X509 **outCert,
-    STACK_OF(X509) **outCa);
+    X509_SIG* inP8,
+    X509* inCert,
+    STACK_OF(X509)* inCa,
+    int* outPfxLength,
+    unsigned char** outPfxBytes);
 
 PKCS12 *KeyIso_pkcs12_create_p8(
     X509_SIG *p8, 
@@ -220,14 +238,10 @@ int KeyIso_pbe_get_algor_params(
     unsigned char **hmac, 
     unsigned int *hmacLen);
 
-bool KeyIso_is_equal_oid(const ASN1_OBJECT *oid, const char* expectedAlgOid);
-
-const void* KeyIso_pbe_get_algor_param_asn1(
-    const char* title,
-    const X509_ALGOR *algor,
-    const char* expectedAlgOid);
-
-bool KeyIso_is_oid_pbe2(const uuid_t correlationId, const unsigned char *keyBytes, int keyLen);
+bool KeyIso_is_oid_pbe2(
+    const uuid_t correlationId, 
+    const unsigned char *keyBytes, 
+    int keyLen);
 
 int KeyIso_get_enc_key_params(
     const KEYISO_ENCRYPTED_PRIV_KEY_ST *inEncKey,
@@ -245,10 +259,6 @@ int KeyIso_create_pkcs8_enckey(
     const KEYISO_ENCRYPTED_PRIV_KEY_ST *inEncKey, 
     X509_SIG **outP8);
 
-int KeyIso_create_enckey_from_p8(
-    const X509_SIG *inP8,
-    KEYISO_ENCRYPTED_PRIV_KEY_ST **outEncKey);
-
 int KeyIso_x509_sig_dup(
     const X509_SIG *in,
     X509_SIG *out);
@@ -261,6 +271,28 @@ int KeyIso_cert_sign(
 
 bool KeyIso_check_default(
     const char* name);
+
+size_t KeyIso_get_bn_param_len(
+    const EVP_PKEY *pkey, 
+    const char *paramType, 
+    BIGNUM **outParam);
+
+int KeyIso_conf_cert_sign_prov(
+    const uuid_t correlationId,
+    const CONF* conf,
+    X509* cert,
+    EVP_PKEY* pkey,
+    void* libCtx,
+    const char *propq);
+
+int KeyIso_open_key_by_compatibility(
+    uuid_t correlationId, 
+    KEYISO_KEY_CTX **keyCtx,
+    unsigned char *pfxBytes, 
+    int pfxLength, 
+    char *salt,
+    bool isKeyP8Compatible, 
+    bool isServiceP8Compatible);
 
 /*//////////
     RSA
@@ -277,6 +309,13 @@ KEYISO_RSA_PKEY_ST* KeyIso_export_rsa_epkey(
 EVP_PKEY* KeyIso_get_rsa_evp_pub_key(
     const uuid_t correlationId,
     const KEYISO_RSA_PUBLIC_KEY_ST* inPubKey);
+
+int KeyIso_get_rsa_params(
+    const EVP_PKEY *pkey, 
+    BIGNUM **rsa_n,  // Modulus (public)
+    BIGNUM **rsa_e,  // Exponent (public)
+    BIGNUM **rsa_p,  // Prime1 (private)
+    BIGNUM **rsa_q); // Prime2 (private)
 
 /*//////////
     EC

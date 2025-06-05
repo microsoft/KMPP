@@ -1309,7 +1309,7 @@ static SerializeStatus _encode_rsa_enc_dec_with_attached_key_st(KEYISO_RSA_PRIVA
     // Encode encrypt/decrypt operation parameters
     CBOR_CHECK_STATUS(_encode_rsa_enc_dec_op_params_to_map(&mapEncoder, stToEncode->decrypt, stToEncode->padding, stToEncode->tlen, stToEncode->fromBytesLen, stToEncode->labelLen))
 
-    //Encode encrypt/decrypt operation parameters
+
     size_t dynamicLen = KeyIso_get_rsa_enc_dec_with_attached_key_in_dynamic_bytes_len(NULL, stToEncode->saltLen, stToEncode->ivLen, stToEncode->hmacLen, stToEncode->encKeyLen, stToEncode->fromBytesLen, stToEncode->labelLen);
     if (dynamicLen == 0 || dynamicLen > UINT32_MAX) {
         KEYISOP_trace_log_error_para(NULL, 0, KEYISOP_ENGINE_TITLE, "Invalid encrypted key size", "Failed", "size: %ld", dynamicLen);

@@ -614,3 +614,74 @@ int KeyIso_create_pkcs8_enckey(
     *outP8 = p8;
     return STATUS_OK;
 }
+
+const void* KeyIso_pbe_get_algor_param_asn1(const char* title, const X509_ALGOR *alg, const char* expectedAlgOid)
+{
+    int paramType = 0;
+    const void* param =  NULL;
+    const ASN1_OBJECT* oid = NULL;
+
+    if (alg == NULL) {
+        KEYISOP_trace_log_error(NULL, 0, title, "get PBE algorithm parameters", "invalid parameters");
+        return NULL;
+    }
+    
+    ERR_clear_error();
+
+    X509_ALGOR_get0(&oid, &paramType, &param, alg);
+    if (oid == NULL || param == NULL) {
+        KEYISOP_trace_log_openssl_error(NULL, 0, title, "get PBE algorithm parameters - failed to get PBE algorithm parameters");
+        return NULL;
+    }
+    
+    if (paramType != V_ASN1_SEQUENCE) {
+        KEYISOP_trace_log_error(NULL, 0, title, "get PBE algorithm parameters", "invalid parameter type");
+        return NULL;
+    }
+
+    if(!KeyIso_is_equal_oid(oid, expectedAlgOid)) {
+        KEYISOP_trace_log_error(NULL, 0, title, "get PBE algorithm parameters", "invalid oid");
+        return NULL;
+    }
+
+    return param;
+}
+
+bool KeyIso_is_equal_oid(const ASN1_OBJECT *oid, const char* expectedAlgOid)
+{
+    size_t oid_length = 0;
+    size_t oid_txt_length = 0;
+    bool isValid = false;
+
+    if (!oid) {
+        KEYISOP_trace_log_error(NULL, 0, KEYISOP_OPEN_KEY_TITLE, "Algorithm identifier", "Failed to get OID");
+        return isValid;
+    }
+
+    oid_length = OBJ_length(oid);
+    if (!oid_length) {
+        KEYISOP_trace_log_error(NULL, 0, KEYISOP_OPEN_KEY_TITLE, "Algorithm identifier", "OID length is zero");
+        return isValid;
+    }
+    
+    // Calculating the length for the oid text buffer
+    // OBJ_obj2txt returns the length of the string written to buf if buf is not NULL and buf_len is big enough, 
+    // otherwise the total string length. Note that this does not count the trailing NUL character.
+    oid_txt_length = OBJ_obj2txt(NULL, 0, oid, KMPP_OID_NO_NAME);
+    char *oid_txt = (char *) KeyIso_zalloc(oid_txt_length + 1);
+    if (!oid_txt) {
+        KEYISOP_trace_log_error(NULL, 0, KEYISOP_OPEN_KEY_TITLE, "Memory allocation", "Failed");
+        return isValid;
+    }
+
+    if (OBJ_obj2txt(oid_txt, oid_txt_length + 1, oid, KMPP_OID_NO_NAME) != oid_txt_length) {
+        KEYISOP_trace_log_error(NULL, 0, KEYISOP_OPEN_KEY_TITLE, "OBJ_obj2txt", "Failed");
+        KeyIso_free(oid_txt);
+        return isValid;
+    }
+    
+    KEYISOP_trace_log_para(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_OPEN_KEY_TITLE, "Algorithm parameters:algorithm identifier", "OID: %s", oid_txt);
+    isValid = (strcmp(oid_txt, expectedAlgOid) == 0);
+    KeyIso_free(oid_txt);
+    return isValid;
+}

@@ -1,0 +1,30 @@
+name: "KMPP CodeQL Configuration"
+
+# Define languages analyzed
+languages:
+  - cpp
+  - csharp
+  - c
+
+# Path filters for C/C++ files
+paths-ignore:
+  - '**/thirdparty/**'
+  - '**/tpm/**'
+
+# Path filters specific to each language
+queries:
+  - uses: security-and-quality
+
+# Language-specific settings
+cpp:
+  paths:
+    - '**/*.c'
+    - '**/*.cpp'
+    - '**/*.h'
+    - '**/*.hpp'
+  paths-ignore:
+    - '**/tools/DotNetKMPP/**'
+
+csharp:
+  paths:
+    - '**/tools/DotNetKMPP/**/*.cs'

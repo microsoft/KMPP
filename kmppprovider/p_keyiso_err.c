@@ -17,26 +17,50 @@ static ERR_STRING_DATA KMPP_ERR_library_string[] = {
 static ERR_STRING_DATA KMPP_str_reasons[] = {
     {ERR_PACK(0, 0, KeyIsoErrReason_AllocFailure), "allocation failure"},
     {ERR_PACK(0, 0, KeyIsoErrReason_OperationFailed), "operation failed"},
-    {ERR_PACK(0, 0, KeyIsoErrReason_ImportFailed), "import key failed"},
-    {ERR_PACK(0, 0, KeyIsoErrReason_ExportFailed), "export key failed"},
+    {ERR_PACK(0, 0, KeyIsoErrReason_FailedToImport), "failed to import key"},
+    {ERR_PACK(0, 0, KeyIsoErrReason_FailedToExport), "failed to export"},
+    {ERR_PACK(0, 0, KeyIsoErrReason_FailedToInitProvider), "failed to initialize the provider"},
+    {ERR_PACK(0, 0, KeyIsoErrReason_FailedToGetBio), "failed to get bio core ctx"},
     {ERR_PACK(0, 0, KeyIsoErrReason_FailedToGetLibCtx), "failed to get lib ctx"},
     {ERR_PACK(0, 0, KeyIsoErrReason_FailedToGetParams), "failed to get parameters"},
     {ERR_PACK(0, 0, KeyIsoErrReason_FailedToGetPadding), "failed to get padding"},
     {ERR_PACK(0, 0, KeyIsoErrReason_FailedToGetKeyBytes), "failed to get key bytes"},
-    {ERR_PACK(0, 0, KeyIsoErrReason_FailedToGetPubkey), "failed to get public key"},
+    {ERR_PACK(0, 0, KeyIsoErrReason_FailedToGetPubKey), "failed to get public key"},
+    {ERR_PACK(0, 0, KeyIsoErrReason_FailedToGetKeyType), "failed to get key type"},
     {ERR_PACK(0, 0, KeyIsoErrReason_FailedToGetKeyCtx), "failed to get key context"},
     {ERR_PACK(0, 0, KeyIsoErrReason_FailedToGetProvKey), "failed to get provider key"},
+    {ERR_PACK(0, 0, KeyIsoErrReason_FailedToLoadProvKey), "failed to load provider"},
     {ERR_PACK(0, 0, KeyIsoErrReason_FailedToGetUri), "failed to get URI"},
     {ERR_PACK(0, 0, KeyIsoErrReason_FailedToSetParams), "failed to set parameters"},
+    {ERR_PACK(0, 0, KeyIsoErrReason_FailedToGenerateKey), "failed to generate key pair"},
+    {ERR_PACK(0, 0, KeyIsoErrReason_FailedToCreatePfx), "failed to create encrypted PFX"},
+    {ERR_PACK(0, 0, KeyIsoErrReason_FailedToCreateCert), "failed to create X509 Cert with public key"},
+    {ERR_PACK(0, 0, KeyIsoErrReason_FailedToEncodePem), "failed to encode PEM file"},
+    {ERR_PACK(0, 0, KeyIsoErrReason_FailedToDecodePem), "failed to decode PEM file"},
+    {ERR_PACK(0, 0, KeyIsoErrReason_FailedToFormatKeyId), "failed to format keyId"},
+    {ERR_PACK(0, 0, KeyIsoErrReason_UnsupportedType), "unsupported type"},
+    {ERR_PACK(0, 0, KeyIsoErrReason_UnsupportedSelection), "unsupported selection"},
+    {ERR_PACK(0, 0, KeyIsoErrReason_FailedToSetKeyAttributes), "failed to set key attributes"},
+    {ERR_PACK(0, 0, KeyIsoErrReason_FailedToGetConf), "failed to get configuration"},
+    {ERR_PACK(0, 0, KeyIsoErrReason_FailedToEditAltNamesSection), "failed to edit alt names section"},
     {ERR_PACK(0, 0, KeyIsoErrReason_UnsupportedScheme), "unsupported scheme"},
     {ERR_PACK(0, 0, KeyIsoErrReason_UnsupportedPadding), "unsupported padding"},
     {ERR_PACK(0, 0, KeyIsoErrReason_UnsupportedDataType), "unsupported data type"},
     {ERR_PACK(0, 0, KeyIsoErrReason_UnsupportedSaltLen), "unsupported salt length"},
     {ERR_PACK(0, 0, KeyIsoErrReason_UnsupportedAlgorithm), "unsupported algorithm"},
+    {ERR_PACK(0, 0, KeyIsoErrReason_UnsupportedNumberOfPrimes), "unsupported number of primes"},
+    {ERR_PACK(0, 0, KeyIsoErrReason_UnsupportedFormat), "unsupported format"},
+    {ERR_PACK(0, 0, KeyIsoErrReason_UnsupportedKeyType), "unsupported key type"},
     {ERR_PACK(0, 0, KeyIsoErrReason_InvalidStoreCtx), "invalid store context"},
     {ERR_PACK(0, 0, KeyIsoErrReason_InvalidMsgDigest), "invalid message digest"},
     {ERR_PACK(0, 0, KeyIsoErrReason_InvalidParams), "invalid parameters"},
+    {ERR_PACK(0, 0, KeyIsoErrReason_InvalidKeySize), "invalid key size"},
+    {ERR_PACK(0, 0, KeyIsoErrReason_InvalidKeyId), "invalid key type"},
+    {ERR_PACK(0, 0, KeyIsoErrReason_InvalidLength), "invalid length"},
+    {ERR_PACK(0, 0, KeyIsoErrReason_HeaderNotFound), "header not found"},
     {ERR_PACK(0, 0, KeyIsoErrReason_InvalidSignatureLength), "invalid signature length"},
+    {ERR_PACK(0, 0, KeyIsoErrReason_FailedEncodingPublicKey), "failed to encode public key"},
+    {ERR_PACK(0, 0, KeyIsoErrReason_FailedToLoadKeyForKeysInUse), "failed to load key for keys in use"},
     {0, NULL}
 };
 
@@ -98,7 +122,7 @@ void ERR_KMPP_error_para(int reason, const char *fmt, ...)
 const char *ERR_KMPP_get_string(int reason)
 {
     if (reason < KeyIsoErrReason_AllocFailure || 
-        reason > KeyIsoErrReason_InvalidSignatureLength) {
+        reason >= KeyIsoErrReason_MaxError) {
         return NULL;
     }
 

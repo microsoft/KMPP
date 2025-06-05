@@ -331,12 +331,14 @@ static int _cp_if_valid(const uuid_t correlationId, uint8_t* toBytes, int32_t  b
 
 
 // RSA Encrypt Decrypt with Encrypted Key
-static KEYISO_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY_IN_ST* _create_rsa_private_encrypt_decrypt_with_attached_key_message(const KEYISO_KEY_CTX *keyCtx,
-    int decrypt, int flen, const unsigned char *from, int tlen, int padding, size_t *totalStSize) 
+static KEYISO_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY_IN_ST* _create_rsa_private_encrypt_decrypt_with_attached_key_message(
+    const KEYISO_KEY_CTX *keyCtx, int decrypt, int flen, const unsigned char *from, int tlen, int padding, size_t *totalStSize) 
 {
-    if (!totalStSize || !keyCtx || !from)
+    if (!totalStSize || !keyCtx || !from) {
         return NULL;
+    }
     
+    *totalStSize = 0;
     KEYISO_KEY_DETAILS* keyDetails = (KEYISO_KEY_DETAILS*)keyCtx->keyDetails;
     if (!keyDetails) {
         return NULL;
@@ -358,7 +360,8 @@ static KEYISO_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY_IN_ST* _create_rsa_private_e
         KEYISOP_trace_log_error_para(keyCtx->correlationId, 0, KEYISOP_RSA_ENCRYPT_TITLE, "Invalid input", "Invalid dynamic length", "dynamicLen = %ld, flen = %d", dynamicLen, flen);
         return NULL;
     }
-    size_t totalSize =  GET_DYNAMIC_STRUCT_SIZE(KEYISO_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY_IN_ST, dynamicLen);
+
+    size_t totalSize = GET_DYNAMIC_STRUCT_SIZE(KEYISO_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY_IN_ST, dynamicLen);
     KEYISO_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY_IN_ST* inSt = (KEYISO_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY_IN_ST *)KeyIso_zalloc(totalSize);
     if (inSt == NULL) {
         KeyIso_free(encKeySt);
@@ -367,12 +370,14 @@ static KEYISO_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY_IN_ST* _create_rsa_private_e
     
     _fill_header(&inSt->headerSt, IpcCommand_RsaPrivateEncryptDecryptWithAttachedKey, keyCtx->correlationId);
     
-    // Fill message
+    // Fill the open key details
     inSt->algVersion = encKeySt->algVersion;
     inSt->saltLen = encKeySt->saltLen;
     inSt->ivLen = encKeySt->ivLen;
     inSt->hmacLen = encKeySt->hmacLen;
     inSt->encKeyLen = encKeySt->encKeyLen;
+
+    // Copy the encrypted key bytes
     size_t encryptedKeySize = KeyIso_get_enc_key_bytes_len(keyCtx->correlationId, encKeySt->saltLen, encKeySt->ivLen, encKeySt->hmacLen, encKeySt->encKeyLen);
     if (encryptedKeySize == 0) {
         KEYISOP_trace_log_error(keyCtx->correlationId, 0, KEYISOP_OPEN_KEY_TITLE, "encryptedKeySize", "Invalid encrypted key size");
@@ -381,26 +386,27 @@ static KEYISO_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY_IN_ST* _create_rsa_private_e
         return NULL;
     }
     memcpy(inSt->bytes, encKeySt->encryptedKeyBytes, encryptedKeySize);
+    KeyIso_free(encKeySt);
+    encKeySt = NULL;
+
+    // Fill crypto operation details
     inSt->decrypt = decrypt;
     inSt->padding = padding;
     inSt->tlen = tlen;
     inSt->fromBytesLen = flen;
-    // OAEP - The label needs to be filled here once the client will support provider and keycontext will hold the label
-    inSt->labelLen = 0;
-    memcpy(inSt->bytes + encryptedKeySize, from, dynamicLen - encryptedKeySize);
-
-    KeyIso_free(encKeySt);
-
+    inSt->labelLen = 0; // OAEP - The label needs to be filled here once the client supports provider and key context holds the label
+    memcpy(inSt->bytes + encryptedKeySize, from, flen);
+    
     // Copy the secret salt
     const char* salt = keyDetails->salt;
     size_t secretSaltLen = strlen(salt);
     if (secretSaltLen >= KEYISO_SECRET_SALT_STR_BASE64_LEN) {
         KEYISOP_trace_log_error(keyCtx->correlationId, 0, KEYISOP_OPEN_KEY_TITLE, "secretSalt", "Invalid secret salt length");  
+        KeyIso_free(inSt);
         return NULL;
     }
     memcpy(inSt->secretSalt, salt, secretSaltLen);
     inSt->secretSalt[KEYISO_SECRET_SALT_STR_BASE64_LEN - 1] = '\0';
-
     *totalStSize = totalSize;
     return inSt;
 }
@@ -446,8 +452,14 @@ static int _handle_rsa_private_encrypt_decrypt_message_with_attached_key(KEYISO_
     IPC_REPLY_ST *reply = _create_and_send_generic_msg(keyCtx, command, msgLen, msgBuf, &result);    
     KeyIso_clear_free(msgBuf, msgLen);
 
-    //3. Deserialize response (if needed) and return relevant fields
     int actualLen = 0;
+    KEYISO_KEY_DETAILS *keyDetails = (KEYISO_KEY_DETAILS*)keyCtx->keyDetails;
+    if (!keyDetails) {
+        KEYISOP_trace_log_error(keyCtx->correlationId, 0, KEYISOP_RSA_ENCRYPT_TITLE, "keyDetails", "Invalid key details");
+        return actualLen;
+    }
+
+    //3. Deserialize response (if needed) and return relevant fields
     if (reply) {
         if (result == STATUS_OK) {
             KEYISO_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY_OUT_ST *outSt = NULL;
@@ -467,11 +479,10 @@ static int _handle_rsa_private_encrypt_decrypt_message_with_attached_key(KEYISO_
                     if (outSt != NULL) {
                         result = KeyIso_deserialize_rsa_enc_dec_with_attached_key_out(reply->outSt, reply->outLen, outSt);
                         if (result == STATUS_OK) {
+                            keyDetails->keyId = outSt->keyId;
                             if (_cp_if_valid(keyCtx->correlationId, outSt->toBytes, outSt->bytesLen, to, tlen) == STATUS_OK) {
                                 actualLen = outSt->bytesLen;
                             }
-                            KEYISO_KEY_DETAILS* keyDetails = (KEYISO_KEY_DETAILS*)keyCtx->keyDetails;
-                            keyDetails->keyId = outSt->keyId;
                         }
                         KeyIso_free(outSt);
                     }

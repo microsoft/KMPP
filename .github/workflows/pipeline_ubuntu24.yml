@@ -1,4 +1,4 @@
-name: Build and Test All Flags - UBUNTU 20.04
+name: Build and Test All Flags - UBUNTU 24.04
 
 on:
   push:
@@ -12,7 +12,7 @@ permissions: read-all
 
 jobs:
   build:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-24.04
     
     steps:
     - name: Checkout repository
@@ -24,7 +24,7 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y pkg-config cmake libcurl4-openssl-dev libglib2.0-dev libgtest-dev libdbus-1-dev uuid-dev libssl-dev build-essential googletest libtss2-dev 
+        sudo apt-get install -y pkg-config cmake libcurl4-openssl-dev libglib2.0-dev libgtest-dev libdbus-1-dev uuid-dev libssl-dev build-essential googletest libtss2-dev libjansson-dev
         curl -sSL -O https://packages.microsoft.com/config/ubuntu/20.04/packages-microsoft-prod.deb
         sudo dpkg -i packages-microsoft-prod.deb 
         sudo rm packages-microsoft-prod.deb 

@@ -44,3 +44,23 @@ if id "$username" >/dev/null 2>&1; then
   sudo userdel "$username"
   echo "User $username removed successfully."
 fi
+
+# Removing KMPP default configuration if was added
+openssl3="@KMPP_OPENSSL_3@"
+generalLinux="@KMPP_GENERAL_PURPOSE_TARGET@"
+defaultProviderCfgScript="@KMPP_DEFAULT_PROVIDER_CNF_SCRIPT_PATH@"
+
+# Convert values to lowercase for consistent comparison
+openssl3=$(echo $openssl3 | tr '[:upper:]' '[:lower:]')
+generalLinux=$(echo $generalLinux | tr '[:upper:]' '[:lower:]')
+
+disableDefaultProvider=0
+# Check if the admin explicitly wanted to avoid KMPP to be the default provider
+if [ -f /etc/kmpp/disableDefaultProvider ]; then
+    disableDefaultProvider=1
+fi
+
+if [ "$openssl3" = "on" ] && [ "$generalLinux" = "on" ] && [ "$disableDefaultProvider" -eq 0 ]; then
+    echo "Removing KMPP default configuration"
+    sh ${defaultProviderCfgScript}/remove_kmpp_default_configuration.sh
+fi

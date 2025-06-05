@@ -1,4 +1,4 @@
-name: Test build.sh - UBUNTU 20.04
+name: Test build.sh - UBUNTU 24.04
 
 on:
   push:
@@ -12,7 +12,7 @@ permissions: read-all
 
 jobs:
   build:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-24.04
 
     steps:
     - name: Checkout repository

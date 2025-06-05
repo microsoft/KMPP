@@ -195,7 +195,7 @@ static int _get_pkey_ec_meth(EVP_PKEY_METHOD **pkey_ec_meth)
 
 static void _trace_log_configuration()
 {
-    if (g_config.isDefault) {
+    if (g_config.isDefaultSolutionType) {
         KEYISOP_trace_log_para(NULL, 0, KEYISOP_ENGINE_TITLE, "default solution type", "config file does not exist or failed to be loaded. solutionType: %d", g_config.solutionType);
     } else {
         KEYISOP_trace_log_para(NULL, 0, KEYISOP_ENGINE_TITLE, "non-default solution type", "config file was loaded. solutionType: %d", g_config.solutionType);
@@ -574,47 +574,6 @@ static int bind_helper(ENGINE *e, const char *id)
 IMPLEMENT_DYNAMIC_CHECK_FN()
 IMPLEMENT_DYNAMIC_BIND_FN(bind_helper)
 
-static int _handle_service_p8_compatible(uuid_t correlationId, KEYISO_KEY_CTX **keyCtx,
-                                         unsigned char *pfxBytes, int pfxLength, char *salt,
-                                         bool isKeyP8Compatible, const char *title)
-{
-    if (!isKeyP8Compatible) {
-        KEYISOP_trace_log_error(correlationId, KEYISOP_TRACELOG_WARNING_FLAG, title, "",
-                          "Opening an encrypted keyid of an old version with service that can support pkcs#8 key with symcrypt FIPS compliant lib - please re-import/re-generate the key with new service");
-        return KeyIso_CLIENT_pfx_open(correlationId, pfxLength, pfxBytes, salt, keyCtx);
-    } else {
-        return KeyIso_CLIENT_private_key_open_from_pfx(correlationId, pfxLength, pfxBytes, salt, keyCtx);
-    }
-}
-
-static int _handle_service_not_p8_compatible(uuid_t correlationId, KEYISO_KEY_CTX **keyCtx,
-                                             unsigned char *pfxBytes, int pfxLength, char *salt,
-                                             bool isKeyP8Compatible, const char *title)
-{
-    if (isKeyP8Compatible) {
-        KMPPPFXerr(KMPPPFX_F_LOAD, KMPPPFX_R_ENGINE_OPEN_INCOMPATIBLE_KEY);
-        KEYISOP_trace_log_error(correlationId, 0, title, "Not supported",
-                                "Trying to open pkcs#8 new version key with service that is not supporting such key - please update the service or import the key with current service");
-        return STATUS_FAILED;
-    } else {
-        return KeyIso_CLIENT_pfx_open(correlationId, pfxLength, pfxBytes, salt, keyCtx);
-    }
-}
-
-static int _open_key_by_compatibility(uuid_t correlationId, KEYISO_KEY_CTX **keyCtx,
-                                      unsigned char *pfxBytes, int pfxLength, char *salt,
-                                      bool isKeyP8Compatible, bool isServiceP8Compatible)
-{
-    const char *title = KEYISOP_ENGINE_TITLE;
-
-    if (isServiceP8Compatible) {
-        return _handle_service_p8_compatible(correlationId, keyCtx, pfxBytes, pfxLength, salt, isKeyP8Compatible, title);
-    } else {
-        return _handle_service_not_p8_compatible(correlationId, keyCtx, pfxBytes, pfxLength, salt, isKeyP8Compatible, title);
-    }
-}
-
-
 static int kmpppfx_load(ENGINE *eng, const char *key_id,
                            EVP_PKEY **pkey, X509 **cert, STACK_OF(X509) **ca)
 {
@@ -694,7 +653,7 @@ static int kmpppfx_load(ENGINE *eng, const char *key_id,
             goto err;
         }
 
-        ret = _open_key_by_compatibility(correlationId, &key->keyCtx, pfxBytes, pfxLength, salt, isKeyP8Compatible, isServiceP8Compatible);
+        ret = KeyIso_open_key_by_compatibility(correlationId, &key->keyCtx, pfxBytes, pfxLength, salt, isKeyP8Compatible, isServiceP8Compatible);
         if (!ret) {
             KMPPPFXerr(KMPPPFX_F_LOAD, KMPPPFX_R_PFX_OPEN_ERROR);
             goto err;
@@ -728,7 +687,7 @@ static int kmpppfx_load(ENGINE *eng, const char *key_id,
             goto err;
         }
 
-        ret = _open_key_by_compatibility(correlationId, &key->keyCtx, pfxBytes, pfxLength, salt, isKeyP8Compatible, isServiceP8Compatible);
+        ret = KeyIso_open_key_by_compatibility(correlationId, &key->keyCtx, pfxBytes, pfxLength, salt, isKeyP8Compatible, isServiceP8Compatible);
         if (!ret) {
             KMPPPFXerr(KMPPPFX_F_LOAD, KMPPPFX_R_PFX_OPEN_ERROR);
             goto err;
@@ -750,8 +709,12 @@ static int kmpppfx_load(ENGINE *eng, const char *key_id,
     ret = 1;
 
 end:
-    if (ret == 1)
+    if (ret == 1) {
         KEYISOP_trace_log(correlationId, KEYISOP_TRACELOG_VERBOSE_FLAG, title, "Complete");
+        KEYISOP_trace_log_and_metric_para(correlationId, 0, g_config.solutionType, title, "", 
+            "key was successfully loaded. Key type: %d. isKeyP8Compatible: %d. isServiceP8Compatible: %d. isDefaultSolutionType: %d", 
+            EVP_PKEY_id(*pkey), isKeyP8Compatible, isServiceP8Compatible, g_config.isDefaultSolutionType);
+    }
 
     KeyIso_free(pfxBytes);
     KeyIso_clear_free_string(salt);

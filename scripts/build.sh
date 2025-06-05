@@ -50,7 +50,7 @@ fi
 
 # Update package lists
 sudo apt-get update  
-sudo apt-get install -y pkg-config cmake curl libcurl4-openssl-dev libglib2.0-dev libgtest-dev libdbus-1-dev uuid-dev libssl-dev build-essential googletest libtss2-dev 
+sudo apt-get install -y pkg-config cmake curl libcurl4-openssl-dev libglib2.0-dev libgtest-dev libdbus-1-dev uuid-dev libssl-dev build-essential googletest libtss2-dev libjansson-dev  
 curl -sSL -O https://packages.microsoft.com/config/ubuntu/20.04/packages-microsoft-prod.deb
 if [ -f packages-microsoft-prod.deb ]; then
     sudo dpkg -i packages-microsoft-prod.deb

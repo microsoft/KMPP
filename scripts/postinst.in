@@ -4,14 +4,20 @@
 # Licensed under the MIT License.
 
 username="@KMPP_USER_NAME@"
+openssl3="@KMPP_OPENSSL_3@"
+generalLinux="@KMPP_GENERAL_PURPOSE_TARGET@"
+defaultProviderCnfScript="@KMPP_DEFAULT_PROVIDER_CNF_SCRIPT_PATH@"
 TPM_DEVICE="/dev/tpm*"
 SYSTEM_DIR="/usr/lib/systemd/system"
 
-tpmEnabled=$(echo "@KMPP_GENERAL_PURPOSE_TARGET@" | tr '[:upper:]' '[:lower:]')
+# Convert values to lowercase for consistent comparison
+openssl3=$(echo $openssl3 | tr '[:upper:]' '[:lower:]')
+generalLinux=$(echo $generalLinux | tr '[:upper:]' '[:lower:]')
+
 tpmExist=$(ls /dev/tpm* >/dev/null 2>&1 && grep -qE "^tss:" /etc/group >/dev/null 2>&1 && echo "true" || echo "false")
 
 # Add user to tss group only if TPM enabled and exists
-if [ "$tpmEnabled" = "on" ] && [ "$tpmExist" = "true" ]; then
+if [ "$generalLinux" = "on" ] && [ "$tpmExist" = "true" ]; then
 
   sudo usermod -aG tss $username
   echo "User $username was added to tss group"
@@ -19,6 +25,20 @@ if [ "$tpmEnabled" = "on" ] && [ "$tpmExist" = "true" ]; then
   # Take the relevant service unit file
   mv ${SYSTEM_DIR}/dbus-com.microsoft.kmpp.service ${SYSTEM_DIR}/dbus-com.microsoft.kmpp.service.default
   mv ${SYSTEM_DIR}/dbus-com.microsoft.kmpp.service.tpm ${SYSTEM_DIR}/dbus-com.microsoft.kmpp.service
+fi
+
+# Check if the admin has disabled the default provider in installation
+disableDefaultProvider=0
+if [ -f /etc/kmpp/disableDefaultProvider ]; then
+    disableDefaultProvider=1
+fi
+
+# Configure KMPP as default provider only for openssl 3.X and general-linux
+if [ "$openssl3" = "on" ] && [ "$generalLinux" = "on" ] && [ "$disableDefaultProvider" -eq 0 ]; then
+    echo "KMPP is configured as default provider"
+    echo "${defaultProviderCnfScript}"
+else
+    echo "KMPP is NOT configured as default provider"
 fi
 
 sudo sed -i 's/"\/usr/"/' /usr/lib/systemd/system/dbus-com.microsoft.kmpp.service

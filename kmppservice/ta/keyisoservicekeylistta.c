@@ -19,6 +19,8 @@ const KEY_LIST_ASSIST_FUNCTIONS_TABLE_ST TAKeyListFnctImp = {
     .writeLock = NULL,
     .readUnlock = NULL,
     .writeUnlock = NULL,
+    .initLocks = NULL,
+    .clearLocks = NULL,
     .compareSender = KeyIso_ta_compare_sender,
 };
 

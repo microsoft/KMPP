@@ -215,14 +215,16 @@ static int _rsa_signature_get_ctx_params(KEYISO_PROV_RSA_CTX *ctx, OSSL_PARAM pa
 {
     KEYISOP_trace_log(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_PROVIDER_TITLE, "Start");
 
-    if (ctx == NULL || ctx->provKey == NULL || params == NULL) {
+    OSSL_PARAM *p;
+	KEYISO_PROV_RSA_MD_INFO_CTX* mdInfoTmp = NULL;
+
+    if (ctx == NULL || ctx->provKey == NULL ||  ctx->mdInfoCtx == NULL || params == NULL) {
         return STATUS_FAILED;
     }
-
-    OSSL_PARAM *p;
+	mdInfoTmp = ctx->mdInfoCtx;
 
     p = OSSL_PARAM_locate(params, OSSL_SIGNATURE_PARAM_DIGEST);
-    if (p != NULL && !OSSL_PARAM_set_utf8_string(p, ctx->mdInfo == NULL ? "" : ctx->mdInfo->ptr)) {
+    if (p != NULL && !OSSL_PARAM_set_utf8_string(p, mdInfoTmp->mdInfo == NULL ? "" : mdInfoTmp->mdInfo->ptr)) {
         KMPPerr(KeyIsoErrReason_FailedToGetParams);
         return STATUS_FAILED;
     }
@@ -234,18 +236,18 @@ static int _rsa_signature_get_ctx_params(KEYISO_PROV_RSA_CTX *ctx, OSSL_PARAM pa
 
     // PSS paramaters
     p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_RSA_PSS_SALTLEN);
-    if (p != NULL && _rsa_locate_pss_salt_len(p, ctx->saltLen) != STATUS_OK) {
+    if (p != NULL && _rsa_locate_pss_salt_len(p, mdInfoTmp->saltLen) != STATUS_OK) {
         return STATUS_FAILED;
     }
 
     p = OSSL_PARAM_locate(params, OSSL_SIGNATURE_PARAM_MGF1_DIGEST);
-    if (p != NULL && !OSSL_PARAM_set_utf8_string(p, ctx->mgf1mMdInfo == NULL ? "" : ctx->mgf1mMdInfo->ptr)) {
+    if (p != NULL && !OSSL_PARAM_set_utf8_string(p, mdInfoTmp->mgf1MdInfo == NULL ? "" : mdInfoTmp->mgf1MdInfo->ptr)) {
         KMPPerr(KeyIsoErrReason_FailedToGetParams);
         return STATUS_FAILED;
     }
 
     p = OSSL_PARAM_locate(params, OSSL_SIGNATURE_PARAM_ALGORITHM_ID);
-    if (p != NULL && _rsa_locate_algorithm_id(p, ctx->mdInfo) != STATUS_OK) {
+    if (p != NULL && _rsa_locate_algorithm_id(p, mdInfoTmp->mdInfo) != STATUS_OK) {
         return STATUS_FAILED;
     }
 
@@ -274,26 +276,22 @@ static int _rsa_signature_set_ctx_params(KEYISO_PROV_RSA_CTX *ctx, const OSSL_PA
     KEYISOP_trace_log(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_PROVIDER_TITLE, "Start");
 
     const OSSL_PARAM *p;
+    KEYISO_PROV_RSA_MD_INFO_CTX* mdInfoTmp = NULL;
 
     if (params == NULL)
         return STATUS_OK;
 
-    if (ctx == NULL || ctx->provKey == NULL) {
+    if (ctx == NULL || ctx->provKey == NULL || ctx->provKey->provCtx == NULL || ctx->mdInfoCtx == NULL) {
+		KMPPerr(KeyIsoErrReason_InvalidParams);
         return STATUS_FAILED;
     }
+	mdInfoTmp = ctx->mdInfoCtx;
 
     p = OSSL_PARAM_locate_const(params, OSSL_SIGNATURE_PARAM_DIGEST);
     if (p != NULL) {
-        const char* mdName;
-
-        if (!OSSL_PARAM_get_utf8_string_ptr(p, &mdName)) {
-            KMPPerr(KeyIsoErrReason_InvalidParams);
-            return STATUS_FAILED;
-        }
-
-        // Similarily to SCOSSL, we do not support distinct MD and MGF1 MD
-        if (KeyIso_prov_set_md_from_mdname(mdName, &ctx->md, &ctx->mdInfo) == STATUS_FAILED ||
-            ctx->mdInfo == NULL || (ctx->mgf1mMdInfo != NULL && ctx->mdInfo->id != ctx->mgf1mMdInfo->id)) {
+        // Similarly to SCOSSL, we do not support distinct MD and MGF1 MD
+        if (KeyIso_prov_set_md_from_mdname(NULL, p, NULL, NULL, &mdInfoTmp->md, &mdInfoTmp->mdInfo) == STATUS_FAILED ||
+            mdInfoTmp->mdInfo == NULL || (mdInfoTmp->mgf1MdInfo != NULL && mdInfoTmp->mdInfo->id != mdInfoTmp->mgf1MdInfo->id)) {
             KMPPerr(KeyIsoErrReason_InvalidMsgDigest);
             return STATUS_FAILED;
         }
@@ -326,11 +324,12 @@ static int _rsa_signature_set_ctx_params(KEYISO_PROV_RSA_CTX *ctx, const OSSL_PA
         }
 
         // Padding value was not found in supported map
-        if (paddingItem[i].id == 0) {
+		padding = paddingItem[i].id;
+        if (padding == 0 || (ctx->provKey->keyType == EVP_PKEY_RSA_PSS && padding != RSA_PKCS1_PSS_PADDING)) {
             KMPPerr(KeyIsoErrReason_UnsupportedPadding);
             return STATUS_FAILED;
         }
-        ctx->padding = paddingItem[i].id;
+        ctx->padding = padding;
     }
 
     p = OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_RSA_PSS_SALTLEN);
@@ -372,21 +371,17 @@ static int _rsa_signature_set_ctx_params(KEYISO_PROV_RSA_CTX *ctx, const OSSL_PA
             KMPPerr(KeyIsoErrReason_FailedToSetParams);
             return STATUS_FAILED;
         }
-        ctx->saltLen = saltLen;
+        mdInfoTmp->saltLen = saltLen;
     }
 
     p = OSSL_PARAM_locate_const(params, OSSL_SIGNATURE_PARAM_MGF1_DIGEST);
     if (p != NULL) {
-        const char* mdName;
-
-        if (!OSSL_PARAM_get_utf8_string_ptr(p, &mdName)) {
-            KMPPerr(KeyIsoErrReason_FailedToGetParams);
-            return STATUS_FAILED;
-        }
-
         // Similarily to SCOSSL, we do not support distinct MD and MGF1 MD
-        if (KeyIso_prov_set_md_from_mdname(mdName, &ctx->mgf1Md, &ctx->mgf1mMdInfo) == STATUS_FAILED ||
-            ctx->mgf1mMdInfo == NULL ||  (ctx->mdInfo != NULL && ctx->mgf1mMdInfo->id != ctx->mdInfo->id)) {
+        int status = KeyIso_prov_set_md_from_mdname(NULL, p, NULL, NULL, &mdInfoTmp->mgf1Md, &mdInfoTmp->mgf1MdInfo);
+        if (status == STATUS_FAILED || mdInfoTmp->mgf1MdInfo == NULL || 
+            (mdInfoTmp->mdInfo != NULL && 
+            mdInfoTmp->mgf1MdInfo != NULL && 
+            mdInfoTmp->mgf1MdInfo->id != mdInfoTmp->mdInfo->id)) {
             KMPPerr(KeyIsoErrReason_InvalidMsgDigest);
             return STATUS_FAILED;
         }
@@ -400,12 +395,12 @@ static const OSSL_PARAM* _rsa_signature_gettable_ctx_md_params(KEYISO_PROV_RSA_C
 {
     KEYISOP_trace_log(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_PROVIDER_TITLE, "Start");
 
-    if (ctx->md == NULL) {
+    if (ctx->mdInfoCtx == NULL || ctx->mdInfoCtx->md) {
         KMPPerr(KeyIsoErrReason_InvalidMsgDigest);
         return STATUS_FAILED;
     }
 
-    return EVP_MD_gettable_ctx_params(ctx->md);
+    return EVP_MD_gettable_ctx_params(ctx->mdInfoCtx->md);
 }
 
 static int _rsa_signature_get_ctx_md_params(KEYISO_PROV_RSA_CTX *ctx, OSSL_PARAM *params)
@@ -424,12 +419,12 @@ static const OSSL_PARAM* _rsa_signature_settable_ctx_md_params(KEYISO_PROV_RSA_C
 {
     KEYISOP_trace_log(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_PROVIDER_TITLE, "Start");
 
-    if (ctx->md == NULL) {
+    if (ctx->mdInfoCtx == NULL || ctx->mdInfoCtx->md) {
         KMPPerr(KeyIsoErrReason_InvalidMsgDigest);
         return STATUS_FAILED;
     }
 
-    return EVP_MD_settable_ctx_params(ctx->md);
+    return EVP_MD_settable_ctx_params(ctx->mdInfoCtx->md);
 }
 
 static int _rsa_signature_set_ctx_md_params(KEYISO_PROV_RSA_CTX *ctx, const OSSL_PARAM params[])
@@ -447,14 +442,21 @@ static int _rsa_signature_set_ctx_md_params(KEYISO_PROV_RSA_CTX *ctx, const OSSL
 static int _rsa_signature_signverify_init(KEYISO_PROV_RSA_CTX *ctx, KEYISO_PROV_PKEY *provKey, const OSSL_PARAM params[], int operation)
 {
     KEYISOP_trace_log(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_PROVIDER_TITLE, "Start"); 
-    if (ctx == NULL || provKey == NULL) {
+    if (ctx == NULL || ctx->mdInfoCtx == NULL || provKey == NULL || provKey->provCtx == NULL) {
         return STATUS_FAILED;
     }
 
     ctx->provKey = provKey;
-    ctx->saltLen = RSA_PSS_SALTLEN_AUTO_DIGEST_MAX;
+    ctx->mdInfoCtx->saltLen = RSA_PSS_SALTLEN_AUTO_DIGEST_MAX;
     ctx->operation = operation;
 
+    // Set default md as openssl - Symcrypt provider fails without explicitly setting md
+	if (ctx->mdInfoCtx->md == NULL) {
+		if (KeyIso_prov_set_md_from_mdname(NULL, NULL, KEYISO_PROV_DEFAULT_MD, NULL, &ctx->mdInfoCtx->md, &ctx->mdInfoCtx->mdInfo) == STATUS_FAILED) {
+			KMPPerr(KeyIsoErrReason_InvalidMsgDigest);
+			return STATUS_FAILED;
+		}
+	}
     return _rsa_signature_set_ctx_params(ctx, params);
 }
 
@@ -493,7 +495,7 @@ static int _rsa_signature_pkcs1_sign(KEYISO_PROV_RSA_CTX *ctx, unsigned char *si
     int len = -1;
     unsigned int flen = 0;
     unsigned char *from = NULL;
-    int mdnid = ctx->mdInfo == NULL ? NID_undef : ctx->mdInfo->id;
+    int mdnid = ctx->mdInfoCtx->mdInfo == NULL ? NID_undef : ctx->mdInfoCtx->mdInfo->id;
 
     if(tbs == NULL) {
         return _CLEANUP_RSA_SIGNATURE_PKCS1_PSS_SIGN(STATUS_FAILED, KeyIsoErrReason_InvalidParams);
@@ -523,22 +525,23 @@ static int _rsa_signature_pss_sign(KEYISO_PROV_RSA_CTX *ctx, unsigned char *sig,
     unsigned int flen = 0;
     unsigned char *from = NULL;
     int len = -1;
-    int mgf1MdType = (ctx->mgf1Md != NULL) ? EVP_MD_type(ctx->mgf1Md) : 0;
-	int mdType = (ctx->md != NULL) ? EVP_MD_type(ctx->md) : 0;
+	KEYISO_PROV_RSA_MD_INFO_CTX *mdInfoTmp = ctx->mdInfoCtx;
+    int mgf1MdType = (mdInfoTmp->mgf1Md != NULL) ? EVP_MD_type(mdInfoTmp->mgf1Md) : 0;
+	int mdType = (mdInfoTmp->md != NULL) ? EVP_MD_type(mdInfoTmp->md) : 0;
 
     if(tbs == NULL) {
         return _CLEANUP_RSA_SIGNATURE_PKCS1_PSS_SIGN(STATUS_FAILED, KeyIsoErrReason_InvalidParams);
     }
 
     // In PSS at least one of these value must be set
-    if (ctx->md == NULL && ctx->mgf1Md == NULL) {
+    if (mdInfoTmp->md == NULL && mdInfoTmp->mgf1Md == NULL) {
 		return _CLEANUP_RSA_SIGNATURE_PKCS1_PSS_SIGN(STATUS_FAILED, KeyIsoErrReason_InvalidMsgDigest);
 	}
 
     // mgf1Md and md must be equal unless one of them is NULL as set in _rsa_signature_set_ctx_params  
-    if (ctx->mgf1Md == NULL) {
+    if (mdInfoTmp->mgf1Md == NULL) {
         mgf1MdType = mdType;
-    } else if (ctx->md == NULL) {
+    } else if (mdInfoTmp->md == NULL) {
         mdType = mgf1MdType;
     }
 
@@ -549,7 +552,7 @@ static int _rsa_signature_pss_sign(KEYISO_PROV_RSA_CTX *ctx, unsigned char *sig,
     }
 
 	// Construct "from" buffer to send to service side
-    KeyIso_CLIENT_pkey_rsa_sign_serialization(from, tbs, tbsLen, ctx->saltLen, mdType, mgf1MdType, *sigLen, 0);
+    KeyIso_CLIENT_pkey_rsa_sign_serialization(from, tbs, tbsLen, mdInfoTmp->saltLen, mdType, mgf1MdType, *sigLen, 0);
 
 	// Sending to service side
     len = KeyIso_CLIENT_pkey_rsa_sign(ctx->provKey->keyCtx, (int)flen, from, *sigLen, sig, ctx->padding);
@@ -571,12 +574,13 @@ static int _rsa_signature_sign(KEYISO_PROV_RSA_CTX *ctx, unsigned char *sig, siz
     // Start measuring time for metrics
     START_MEASURE_TIME();
 
-    if (ctx == NULL || ctx->provKey == NULL || ctx->provKey->keyCtx == NULL) {
+    if (ctx == NULL || ctx->provKey == NULL || ctx->provKey->keyCtx == NULL || 
+        ctx->mdInfoCtx == NULL || ctx->provKey->pubKey == NULL) {
         return STATUS_FAILED;
     }
 
     // First call with NULL buffer is to determine the required buffer size (modulus size)
-    size_t modulusSize = KeyIso_get_bn_param_len(ctx->provKey, OSSL_PKEY_PARAM_RSA_N, NULL);;
+    size_t modulusSize = KeyIso_get_bn_param_len(ctx->provKey->pubKey, OSSL_PKEY_PARAM_RSA_N, NULL);
     if (sig == NULL) {
         *sigLen = modulusSize;
         return STATUS_OK;
@@ -604,6 +608,10 @@ static int _rsa_signature_sign(KEYISO_PROV_RSA_CTX *ctx, unsigned char *sig, siz
 
 
     STOP_MEASURE_TIME(KeyisoKeyOperation_PkeyRsaSign);
+ 
+#ifdef KEYS_IN_USE_AVAILABLE
+    //KeyInUseToDo: p_scossl_keysinuse_on_sign(ctx->provKey->keysInUseCtx);
+#endif
 
     return ret;
 }
@@ -623,7 +631,7 @@ static int _rsa_signature_digest_signverify_init(KEYISO_PROV_RSA_CTX *ctx, const
     }
 
     // Set MD into context
-    if (!mdName || (KeyIso_prov_set_md_from_mdname(mdName, &ctx->md, &ctx->mdInfo) == STATUS_FAILED)) {
+    if (!mdName || (KeyIso_prov_set_md_from_mdname(NULL, NULL, mdName, NULL, &ctx->mdInfoCtx->md, &ctx->mdInfoCtx->mdInfo) == STATUS_FAILED)) {
         KMPPerr(KeyIsoErrReason_InvalidMsgDigest);
         return STATUS_FAILED;
     }
@@ -633,7 +641,7 @@ static int _rsa_signature_digest_signverify_init(KEYISO_PROV_RSA_CTX *ctx, const
         return STATUS_FAILED;
     }
 
-    if (!EVP_DigestInit_ex2(ctx->mdCtx, ctx->md, params)) {
+    if (!EVP_DigestInit_ex2(ctx->mdCtx, ctx->mdInfoCtx->md, params)) {
         EVP_MD_CTX_free(ctx->mdCtx);
         ctx->mdCtx = NULL;
         return STATUS_FAILED;
@@ -715,7 +723,7 @@ static int _rsa_signature_digest_sign(KEYISO_PROV_RSA_CTX *ctx, unsigned char *s
     unsigned char digest[EVP_MAX_MD_SIZE];
     unsigned int digestLen = 0;
 
-    if (ctx == NULL || ctx->mdCtx == NULL || ctx->md == NULL){
+    if (ctx == NULL || ctx->mdCtx == NULL || ctx->mdInfoCtx == NULL || ctx->mdInfoCtx->md == NULL){
         KMPPerr(KeyIsoErrReason_InvalidParams);
         return STATUS_FAILED;
     }

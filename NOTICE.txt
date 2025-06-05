@@ -232,6 +232,48 @@ Copyright (c) 1995-1998 Eric A. Young, Tim J. Hudson
 
 ---------------------------------------------------------
 
+KMPP uses jansson. See the following license notice:
+jansson License
+---------------
+
+---------------------------------------------------------
+
+akheron/jansson 684e18c927e89615c2d501737e90018f4930d6c5 - MIT
+
+
+Copyright (c) 2014 Robert Poor <rdpoor@gmail.com>
+Copyright (c) 2007 The Android Open Source Project
+Copyright (c) 2019 Sean Bright <sean.bright@gmail.com>
+Copyright (c) 2009-2011 Petri Lehtinen <petri@digip.org>
+Copyright (c) 2009-2016 Petri Lehtinen <petri@digip.org>
+Copyright (c) 2010-2016 Petri Lehtinen <petri@digip.org>
+Copyright (c) 2010-2012 Graeme Smecher <graeme.smecher@mail.mcgill.ca>
+Copyright (c) 2011-2012 Graeme Smecher <graeme.smecher@mail.mcgill.ca>
+Copyright (c) 2011-2012 Basile Starynkevitch <basile@starynkevitch.net>
+
+Copyright (c) 2009-2020 Petri Lehtinen <petri@digip.org>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+
+---------------------------------------------------------
+
 KMPP uses SCOSSL. See the following license notice:
 SCOSSL License
 ---------------

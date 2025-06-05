@@ -13,7 +13,3 @@ void KeyIso_add_gdbus_sender_to_list(
     const gchar *senderName);
 
 void KeyIso_remove_gdbus_sender_from_list(const gchar *senderName);
-
-
-void KeyIso_initialize_locks();
-void KeyIso_clear_locks();

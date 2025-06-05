@@ -1,85 +1,116 @@
-# This workflow performs CodeQL analysis on both C/C++ and C# projects
-name: "CodeQL Analysis for C/C++ and C#"
+name: "CodeQL"
 
 on:
-  push:
-    branches: [ "main" ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ main ]
   schedule:
-    - cron: '20 22 * * 2' # Weekly scheduled scan
+    - cron: '0 0 * * 0'  # Run once a week at midnight on Sunday
 
 jobs:
   analyze:
-    name: Analyze (${matrix.language})
-    runs-on: ubuntu-20.04
+    name: Analyze
+    runs-on: ubuntu-latest
     permissions:
-      # Required permissions for the workflow
-      security-events: write
-      packages: read
       actions: read
       contents: read
+      security-events: write
 
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - language: c-cpp
-            build-mode: manual
-          - language: csharp
-            build-mode: manual
+        language: [ 'c-cpp', 'csharp' ]  # Use 'c-cpp' instead of separate 'cpp' and 'c'
 
     steps:
-    - name: Checkout Repository
-      uses: actions/checkout@v4
+    - name: Checkout repository
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0  # Fetch all history for accurate analysis
 
-    # Initialize CodeQL for the specified language
+    # If this run was triggered by a pull request event, then checkout
+    # the head of the pull request instead of the merge commit.
+    - run: git checkout HEAD^2
+      if: ${{ github.event_name == 'pull_request' }}
+
+    - name: Install dependencies
+      if: ${{ matrix.language == 'c-cpp' }}
+      run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config cmake libcurl4-openssl-dev libglib2.0-dev libgtest-dev libdbus-1-dev uuid-dev libssl-dev build-essential googletest libtss2-dev libjansson-dev
+          curl -sSL -O https://packages.microsoft.com/config/ubuntu/20.04/packages-microsoft-prod.deb
+          sudo dpkg -i packages-microsoft-prod.deb 
+          sudo rm packages-microsoft-prod.deb 
+          sudo apt-get update 
+          echo "deb https://packages.microsoft.com/ubuntu/20.04/prod testing main" | sudo tee /etc/apt/sources.list.d/microsoft-test.list 
+          sudo apt-get update 
+          sudo apt install -y symcrypt 
+
+    # Setup .NET for C# analysis
+    - name: Setup .NET
+      if: ${{ matrix.language == 'csharp' }}
+      uses: actions/setup-dotnet@v3
+      with:
+        dotnet-version: '6.0.x'
+
     - name: Initialize CodeQL
       uses: github/codeql-action/init@v3
       with:
         languages: ${{ matrix.language }}
-        build-mode: ${{ matrix.build-mode }}
+        config-file: .github/codeql/codeql-config.yml
+        queries: security-and-quality
 
-    # Custom build step for C/C++ projects (manual build mode)
-    - if: matrix.language == 'c-cpp'
-      name: Build C/C++ Project
+
+    # Setup .NET for C# analysis
+    - name: Build KMPP C# code
+      if: ${{ matrix.language == 'csharp' }}
       run: |
-        sudo apt-get update  
-        sudo apt-get install -y pkg-config cmake libcurl4-openssl-dev libglib2.0-dev libgtest-dev libdbus-1-dev uuid-dev libssl-dev build-essential googletest libtss2-dev 
-        curl -sSL -O https://packages.microsoft.com/config/ubuntu/20.04/packages-microsoft-prod.deb
-        if [ -f packages-microsoft-prod.deb ]; then
-            sudo dpkg -i packages-microsoft-prod.deb
-            sudo rm packages-microsoft-prod.deb
+        if [ -d "tools/DotNetKMPP" ]; then
+          cd tools/DotNetKMPP
+          # Check if there's a project file (fix the check to look for any .csproj file)
+          if compgen -G "*.csproj" > /dev/null; then
+            echo "Found project file, building with existing project"
+            dotnet build --configuration Release
+          else
+            echo "No project file found, creating a temporary project"
+            # Create a temporary project file with force flag to overwrite if needed
+            dotnet new classlib --output . --force
+            # Add required packages
+            dotnet add package Microsoft.Extensions.Logging --version 6.0.0
+            dotnet add package Microsoft.Extensions.Logging.Abstractions --version 6.0.0
+            dotnet add package Microsoft.Extensions.Logging.Console --version 6.0.0
+            # Build the project
+            dotnet build --configuration Release
+          fi
         else
-            echo "Failed to download packages-microsoft-prod.deb"
-            exit 1
+          echo "DotNetKMPP directory not found"
         fi
-        sudo apt-get update
-        sudo apt search symcrypt
-        echo "deb https://packages.microsoft.com/ubuntu/20.04/prod testing main" | sudo tee /etc/apt/sources.list.d/microsoft-test.list
-        sudo apt-get update
-        sudo apt install -y symcrypt
-        # Configure CMake
-        cmake -S . -B build
-        # Build the project
-        cmake --build build
-        
-    - if: matrix.language == 'csharp'
-      name: Build C# Project with .NET Core SDK 3.1
+
+    # Custom build steps for C++ code
+    - name: Build KMPP C/C++ code
+      if: ${{ matrix.language == 'c-cpp' }}
       run: |
-        # Update packages and install .NET Core SDK 3.1
-        sudo apt-get update
-        sudo apt-get install -y apt-transport-https
-        wget https://packages.microsoft.com/config/ubuntu/20.04/packages-microsoft-prod.deb -O packages-microsoft-prod.deb
-        sudo dpkg -i packages-microsoft-prod.deb
-        sudo apt-get update
-        sudo apt-get install -y dotnet-sdk-3.1
-        cd tools/DotNetKMPP
-        dotnet build
+        # Ensure build directory is clean
+        rm -rf build
         
+        # Run certificate creation script
+        ./scripts/create_certs.sh
         
-    # Perform CodeQL analysis
+        # Configure with verbose output for CodeQL
+        cmake -S . -B build -DKMPP_DEBUG=ON -DCMAKE_VERBOSE_MAKEFILE=ON
+        
+        # Build with verbose output
+        cmake --build build --verbose
+        
+        # Make scripts executable
+        chmod +x scripts/postinst scripts/preinst
+        
+        # Run pre-install script
+        sh scripts/preinst
+        
+        # Install but don't run post-install during analysis
+        sudo make install -C build
+
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v3
       with:
-        category: "/language:${{ matrix.language }}"
+        category: "/language:${{matrix.language}}"
+        upload: true

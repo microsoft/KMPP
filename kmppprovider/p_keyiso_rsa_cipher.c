@@ -45,13 +45,17 @@ static int _rsa_cipher_set_ctx_params(KEYISO_PROV_RSA_CTX *ctx, const OSSL_PARAM
     KEYISOP_trace_log(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_PROVIDER_TITLE, "Start");
 
     const OSSL_PARAM *p;
+	KEYISO_PROV_RSA_MD_INFO_CTX *mdInfoTmp = NULL;
+
     if (params == NULL)
         return STATUS_OK;
 
-    if (ctx == NULL || ctx->provKey == NULL) {
+    if (ctx == NULL || ctx->provKey == NULL || ctx->provKey->provCtx == NULL || ctx->mdInfoCtx == NULL) {
         KMPPerr(KeyIsoErrReason_InvalidParams);
         return STATUS_FAILED;
     }
+
+    mdInfoTmp = ctx->mdInfoCtx;
 
     p = OSSL_PARAM_locate_const(params, OSSL_ASYM_CIPHER_PARAM_PAD_MODE);
     if (p != NULL) {
@@ -80,8 +84,8 @@ static int _rsa_cipher_set_ctx_params(KEYISO_PROV_RSA_CTX *ctx, const OSSL_PARAM
         }
 
         //  KMPP_RSA_PKCS1_OAEP_PADDING requires MD, set default if ctx->md not populated
-        if (padMode == KMPP_RSA_PKCS1_OAEP_PADDING && ctx->md == NULL) {
-            if (KeyIso_prov_set_md_from_mdname(KEYISO_PROV_DEFAULT_OAEP_DIGEST, &ctx->md, &ctx->mdInfo) == STATUS_FAILED) {
+        if (padMode == KMPP_RSA_PKCS1_OAEP_PADDING && mdInfoTmp->md == NULL) {
+            if (KeyIso_prov_set_md_from_mdname(NULL, NULL, KEYISO_PROV_DEFAULT_OAEP_DIGEST, NULL, &mdInfoTmp->md, &mdInfoTmp->mdInfo) == STATUS_FAILED) {
                 KMPPerr(KeyIsoErrReason_InvalidMsgDigest);
                 return STATUS_FAILED;
             }
@@ -91,13 +95,8 @@ static int _rsa_cipher_set_ctx_params(KEYISO_PROV_RSA_CTX *ctx, const OSSL_PARAM
 
     p = OSSL_PARAM_locate_const(params, OSSL_ASYM_CIPHER_PARAM_OAEP_DIGEST);
     if (p != NULL) {
-        const char* mdName;
-        if (!OSSL_PARAM_get_utf8_string_ptr(p, &mdName)) {
-            KMPPerr(KeyIsoErrReason_FailedToGetParams);
-            return STATUS_FAILED;
-        }
 
-        if (KeyIso_prov_set_md_from_mdname(mdName, &ctx->md, &ctx->mdInfo) == STATUS_FAILED) { 
+        if (KeyIso_prov_set_md_from_mdname(NULL, p, NULL, NULL, &mdInfoTmp->md, &mdInfoTmp->mdInfo) == STATUS_FAILED) {
             KMPPerr(KeyIsoErrReason_FailedToSetParams);
             return STATUS_FAILED;
         }
@@ -105,14 +104,7 @@ static int _rsa_cipher_set_ctx_params(KEYISO_PROV_RSA_CTX *ctx, const OSSL_PARAM
 
     p = OSSL_PARAM_locate_const(params, OSSL_ASYM_CIPHER_PARAM_MGF1_DIGEST);
     if (p != NULL) {
-        const char *mdName;
-
-        if (!OSSL_PARAM_get_utf8_string_ptr(p, &mdName)) {
-            KMPPerr(KeyIsoErrReason_FailedToGetParams);
-            return STATUS_FAILED;
-        }
-
-        if (KeyIso_prov_set_md_from_mdname(mdName, &ctx->mgf1Md, &ctx->mgf1mMdInfo) == STATUS_FAILED) {
+        if (KeyIso_prov_set_md_from_mdname(NULL, p, NULL, NULL, &mdInfoTmp->mgf1Md, &mdInfoTmp->mgf1MdInfo) == STATUS_FAILED) {
             KMPPerr(KeyIsoErrReason_FailedToSetParams);
             return STATUS_FAILED;
         }
@@ -127,7 +119,7 @@ static int _rsa_cipher_set_ctx_params(KEYISO_PROV_RSA_CTX *ctx, const OSSL_PARAM
             KMPPerr(KeyIsoErrReason_FailedToGetParams);
             return STATUS_FAILED;
         }
-        OPENSSL_free(ctx->oaepLabel);
+        KeyIso_free(ctx->oaepLabel);
         ctx->oaepLabel = (unsigned char*)tmpLabel;
         ctx->oaepLabelLen = tmpLabellen;
     }
@@ -177,14 +169,14 @@ static int _rsa_cipher_decrypt(KEYISO_PROV_RSA_CTX *ctx, unsigned char *out, siz
     // Start measuring time for metrics
     START_MEASURE_TIME();
 
-    if (!ctx || !ctx->provKey || !ctx->provKey->keyCtx) {
+    if (!ctx || !ctx->provKey || !ctx->provKey->keyCtx || !ctx->provKey->pubKey) {
 		KMPPerr(KeyIsoErrReason_InvalidParams);
 		return ret;
     }
        
 	// First call with NULL buffer is to determine the required buffer size
     if (out == NULL) {
-        *outLen = (int32_t)KeyIso_get_bn_param_len(ctx->provKey, OSSL_PKEY_PARAM_RSA_N, NULL);
+        *outLen = (int32_t)KeyIso_get_bn_param_len(ctx->provKey->pubKey, OSSL_PKEY_PARAM_RSA_N, NULL);
         return STATUS_OK;
     }
 
@@ -193,8 +185,12 @@ static int _rsa_cipher_decrypt(KEYISO_PROV_RSA_CTX *ctx, unsigned char *out, siz
     ret = resultLen <= INT_MAX;
     *outLen = ret ? (size_t)resultLen : STATUS_FAILED;
 
-	STOP_MEASURE_TIME(KeyisoKeyOperation_RsaPrivDec);	
+	STOP_MEASURE_TIME(KeyisoKeyOperation_RsaPrivDec);
 
+#ifdef KEYS_IN_USE_AVAILABLE    
+    //KeyInUseToDo: p_scossl_keysinuse_on_decrypt(ctx->provKey->keysInUseCtx);    
+#endif
+    
     return ret;
 }
 

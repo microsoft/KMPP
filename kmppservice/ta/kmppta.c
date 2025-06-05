@@ -136,6 +136,7 @@ static int _get_machine_secret(
 TEE_Result TA_CreateEntryPoint(void)
 {
 	KEYISOP_trace_log(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_SERVICE_TITLE, "has been called");
+	KeyIso_initialize_key_list(NULL, KEYISO_KEY_DEFAULT_HASH_SIZE);
 
 	//Confirm the the Symcrypt self-test has passed
 	if (SymCryptFipsGetSelftestsPerformed() & SYMCRYPT_SELFTEST_ALGORITHM_STARTUP) {
@@ -168,6 +169,9 @@ void TA_DestroyEntryPoint(void)
 	
 	// Calling the ECC free function to free the ECC curves
 	KEYISO_EC_free_static();
+
+	// We do not need to call KeyIso_clear_key_list() here, because in TZ it only sets the key list inital size
+	// As there are no locks to protect the key list, we do not need to clear them
 }
 
 

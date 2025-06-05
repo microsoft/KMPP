@@ -97,6 +97,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DKMPPCTRL_BUS_NAME=\\\"${KMPPCTRL_BUS_N
 
 set(KMPP_DEFAULT_CONFIG_PATH "${CMAKE_INSTALL_PREFIX}/share/${KMPP_USER_NAME}/config.cnf")
 set(KMPP_CUSTOM_CONFIG_PATH "${KMPP_ROOT_DIR}/config.cnf")
+set(KMPP_ALLOWED_APPS_JSON_CONFIG "${KMPP_ROOT_DIR}/kmpp_apps.json")
 
 message(STATUS "KMPP_USER_NAME: ${KMPP_USER_NAME}")
 message(STATUS "KMPPCTRL_ALLOW_GROUP: ${KMPPCTRL_ALLOW_GROUP}")
@@ -112,6 +113,8 @@ add_definitions(-DKMPP_ROOT_DIR="${KMPP_ROOT_DIR}")
 add_definitions(-DKMPP_PRIVATE_ROOT_DIR="${KMPP_PRIVATE_ROOT_DIR}")
 add_definitions(-DKMPP_INSTALL_IMAGE_DIR="${KMPP_INSTALL_IMAGE_DIR}")
 add_definitions(-DKMPP_CUSTOM_CONFIG_PATH="${KMPP_CUSTOM_CONFIG_PATH}")
+add_definitions(-DKMPP_ALLOWED_APPS_JSON_CONFIG="${KMPP_ALLOWED_APPS_JSON_CONFIG}")
+
 
 # get version
 set(ENV_PACKAGE_VERSION "$ENV{PKG_VER}")
@@ -308,6 +311,10 @@ message(STATUS "OpenSSl engine directory: ${KMPP_OPENSSL_ENGINE_DIR}")
 pkg_check_modules(GLIB2 REQUIRED glib-2.0 gio-2.0 gio-unix-2.0 gobject-2.0)
 pkg_check_modules(DBUS REQUIRED dbus-1)
 
+if (KMPP_GENERAL_PURPOSE_TARGET)
+  pkg_check_modules(JANSSON REQUIRED jansson)
+endif()
+
 # Base Include Directories
 set(BASE_INCLUDE_DIRS
   include
@@ -418,12 +425,19 @@ set(common_src
   kmpplib/serialization/keyisoipcprivatekeyserialization.c
 )
 
+if(KMPP_GENERAL_PURPOSE_TARGET)
+  list(APPEND common_src
+    kmpplib/keyisojsonutils.c
+  )
+endif()
 
 set(ossl_src
   ${common_src} 
   kmpplib/ossl/keyisomemory.c 
   kmpplib/keyisocommonossl.c
   kmpplib/keyisocert.c
+  kmpplib/keyisopbe.c
+  kmpplib/keyisopkcs12.c
 )
 
 # Client side sources
@@ -431,10 +445,8 @@ set(kmpp_src
   ${ossl_src} 
   kmppclient/keyisoclientinit.c
   kmppclient/keyisoclient.c
-  kmppclient/keyisoclientpbe.c
   kmppclient/keyisoclientmsghandler.c
   kmppclient/keyisoclientpkcs8.c
-  kmppclient/keyisoclientpkcs12.c
   kmppclient/keyisoctrlclient.c
   kmppclient/keyisoipcclientadapter.c
   kmppclient/kmppipcutils.c
@@ -526,9 +538,9 @@ set(common_lib_list
   rt
 )
 
-
 if (KMPP_GENERAL_PURPOSE_TARGET)
   list(APPEND common_lib_list ${TSS2_LIBRARIES})
+  list(APPEND common_lib_list ${JANSSON_LIBRARIES})
 endif()
 
 set(ossl_lib_list 
@@ -812,19 +824,13 @@ if(OS_RELEASE MATCHES "Ubuntu")
     string(REGEX MATCH "VERSION_ID=\"([0-9]+)\\.([0-9]+)\"" _ ${OS_RELEASE})
     set(OS_VERSION "${CMAKE_MATCH_1}.${CMAKE_MATCH_2}")
 
-    set(CPACK_DEBIAN_PACKAGE_DEPENDS "libatomic1, symcrypt")
+    set(CPACK_DEBIAN_PACKAGE_DEPENDS "libatomic1, symcrypt, libjansson4")
     # Ubuntu 22.x specific dependencies
     if(OS_VERSION VERSION_GREATER_EQUAL "22.04")
       set(CPACK_DEBIAN_PACKAGE_DEPENDS "${CPACK_DEBIAN_PACKAGE_DEPENDS}, libtss2-esys-3.0.2-0, libtss2-rc0, libtss2-fapi1")
-      
-    # Ubuntu 20.x specific dependencies
-    elseif(OS_VERSION VERSION_GREATER_EQUAL "20.04")
-      set(CPACK_DEBIAN_PACKAGE_DEPENDS "${CPACK_DEBIAN_PACKAGE_DEPENDS}, libtss2-esys0")
-      
     endif()
 endif()
-
-
+      
 #Note that <COMPONENT> in CPACK_DEBIAN_<COMPONENT>_XXXX variables refers to the grouping name written in upper case.
 set(CPACK_DEBIAN_RUNTIME_PACKAGE_NAME "lib${CPACK_PACKAGE_NAME}")
 set(CPACK_DEBIAN_RUNTIME_DESCRIPTION "Development files for ${CPACK_PACKAGE_NAME}")

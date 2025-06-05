@@ -1725,7 +1725,7 @@ static EVP_PKEY* _cleanup_convert_symcrypt_to_epkey(
     return epkey;
 }
 
-EVP_PKEY* KeyIso_convert_symcrypt_to_epkey(
+EVP_PKEY* KeyIso_convert_symcrypt_rsa_to_epkey(
     const uuid_t correlationId,
     PSYMCRYPT_RSAKEY symcryptRsaKey)
 {
@@ -1882,18 +1882,99 @@ EVP_PKEY* KeyIso_convert_symcrypt_to_epkey(
     return  _cleanup_convert_symcrypt_to_epkey(correlationId, STATUS_OK, pkey, rsa, NULL, modulusPtr, privateExpPtr, primes[0] , primes[1], rsa_n, rsa_e, rsa_p, rsa_q, rsa_d);
 }
 
-int KeyIso_convert_ecdsa_symcrypt_to_epkey(
+static EVP_PKEY* _cleanup_convert_symcrypt_ecc_to_epkey(
     const uuid_t correlationId,
-    uint32_t curveNid,
-    const PSYMCRYPT_ECKEY inEcPkey,
-    EC_KEY** outEcKey, 
-    EC_GROUP** outEcGroup) 
+    int res,
+    EVP_PKEY* evpKey,
+    EC_KEY* ecKey,
+    EC_GROUP* ecGroup,
+    KEYISO_EC_PKEY_ST* ecPkeySt,
+    size_t keyStSize,
+    const char* loc)
 {
-    int res = STATUS_FAILED;
+    // Always clean up the temporary key structure if it exists
+    if (ecPkeySt != NULL) {
+        KeyIso_clear_free(ecPkeySt, keyStSize);
+    }
+
+    if (res != STATUS_OK) {
+        // On failure, free all allocated resources
+        if (ecGroup != NULL) {
+            EC_GROUP_free(ecGroup);
+        }
+        if (ecKey != NULL && evpKey == NULL) {
+            // Only free ecKey if it's not owned by evpKey
+            EC_KEY_free(ecKey);
+        }
+        if (evpKey != NULL) {
+            EVP_PKEY_free(evpKey);
+        }
+        
+        if (loc != NULL) {
+            KEYISOP_trace_log_error(correlationId, 0, KEYISOP_SERVICE_TITLE, loc, "KeyIso_convert_symcrypt_ecc_to_epkey Failed");
+        }
+        return NULL;
+    }
+    
+    // ecKey is now owned by evpKey, but we still need to free ecGroup on success
+    if (ecGroup != NULL) {
+        EC_GROUP_free(ecGroup);
+    }
+    
+    return evpKey;
+}
+
+#define _CLEANUP_CONVERT_SYMCRYPT_ECC_TO_EVPKEY(res, loc) \
+        _cleanup_convert_symcrypt_ecc_to_epkey(correlationId, res, evpKey, ecKey, ecGroup, ecPkeySt, keyStSize, loc)
+
+EVP_PKEY* KeyIso_convert_symcrypt_ecc_to_epkey(
+    const uuid_t correlationId,
+    const PSYMCRYPT_ECKEY inEcPkey) 
+{
+    int ret = STATUS_FAILED;
     size_t keyStSize = 0;
-    KEYISO_EC_PKEY_ST* ecPkeySt = KeyIso_export_ec_pkey_from_symcrypt(correlationId, curveNid, inEcPkey, &keyStSize); // KeyIso_clear_free()
-    res = KeyIso_get_ec_evp_pkey(correlationId, ecPkeySt, outEcKey, outEcGroup);
-    KeyIso_clear_free(ecPkeySt, keyStSize);
-    return res;
+    EVP_PKEY *evpKey = NULL;
+    EC_KEY *ecKey = NULL;
+    EC_GROUP *ecGroup = NULL;
+    KEYISO_EC_PKEY_ST* ecPkeySt  = NULL;
+    
+    if (inEcPkey == NULL) {
+        return _CLEANUP_CONVERT_SYMCRYPT_ECC_TO_EVPKEY(STATUS_FAILED, "Invalid argument, inEcPkey is null");
+    }
+
+    int32_t curveNid = KeyIso_get_curve_nid_from_symcrypt_curve(correlationId, inEcPkey->pCurve);
+    if (curveNid == -1) {
+        return _CLEANUP_CONVERT_SYMCRYPT_ECC_TO_EVPKEY(STATUS_FAILED, "Invalid argument, curveNid is null");
+    }
+    
+    // Export the SymCrypt EC key to our internal structure
+    ecPkeySt = KeyIso_export_ec_pkey_from_symcrypt(
+        correlationId, 
+        curveNid, 
+        inEcPkey, 
+        &keyStSize); // KeyIso_clear_free()
+    
+    if (ecPkeySt == NULL) {
+        return _CLEANUP_CONVERT_SYMCRYPT_ECC_TO_EVPKEY(STATUS_FAILED, "KeyIso_export_ec_pkey_from_symcrypt failed");
+    }
+    
+    // Convert to OpenSSL EC_KEY
+    ret = KeyIso_get_ec_evp_pkey(correlationId, ecPkeySt, &ecKey, &ecGroup);
+    if (ret != STATUS_OK) {
+        return _CLEANUP_CONVERT_SYMCRYPT_ECC_TO_EVPKEY(STATUS_FAILED, "KeyIso_get_ec_evp_pkey failed");
+    }
+    
+    // Create a new EVP_PKEY
+    evpKey = EVP_PKEY_new();
+    if (evpKey == NULL) {
+       return _CLEANUP_CONVERT_SYMCRYPT_ECC_TO_EVPKEY(STATUS_FAILED, NULL);
+    }
+    
+    // Assign the EC_KEY to the EVP_PKEY
+    if (!EVP_PKEY_assign_EC_KEY(evpKey, ecKey)) {
+        return _CLEANUP_CONVERT_SYMCRYPT_ECC_TO_EVPKEY(STATUS_FAILED, "EVP_PKEY_assign_EC_KEY failed");
+    }
+    
+    return _CLEANUP_CONVERT_SYMCRYPT_ECC_TO_EVPKEY(STATUS_OK, NULL);
 }
 #endif // KMPP_OPENSSL_SUPPORT
