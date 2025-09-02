@@ -6,11 +6,17 @@
 # Exit immediately if a command exits with a non-zero status
 set -e
 
+# Default Ubuntu distribution version
+UBUNTU_DISTRIBUTION="22.04"
+
 show_help() {
-    echo "Usage: $(basename "$0") [OPTIONS]"
+    echo "Usage: $(basename "$0") [UBUNTU_DISTRIBUTION] [OPTIONS]"
+    echo ""
+    echo "Arguments:"
+    echo "  UBUNTU_DISTRIBUTION  Ubuntu distribution version (Default: 22.04)"
     echo ""
     echo "Options:"
-    echo "  --help       Display this help message and exit"
+    echo "  --help               Display this help message and exit"
     echo ""
     echo "Description:"
     echo "  This script automates the installation of dependencies, configuration, and building"
@@ -18,13 +24,16 @@ show_help() {
     echo "  runs example tests."
     echo ""
     echo "Usage:"
-    echo "  1. Run the script without any arguments to perform all steps automatically:"
+    echo "  1. Run the script without any arguments to use default distribution (22.04):"
     echo "       ./$(basename "$0")"
     echo ""
-    echo "  2. Run the script with '--help' to see available options and usage examples:"
+    echo "  2. Run the script with a specific Ubuntu distribution:"
+    echo "       ./$(basename "$0") 22.04"
+    echo ""
+    echo "  3. Run the script with '--help' to see available options and usage examples:"
     echo "       ./$(basename "$0") --help"
     echo ""
-    echo "  3. Customize the build process by modifying CMake options directly:"
+    echo "  4. Customize the build process by modifying CMake options directly:"
     echo "       cmake -S . -B build -DKMPP_DEBUG=OFF"
     echo ""
     echo "Compilation Options:"
@@ -43,15 +52,19 @@ show_help() {
     exit 0
 }
 
-# Check for --help argument
+# Parse command line arguments
 if [[ "$1" == "--help" ]]; then
     show_help
+elif [[ -n "$1" && "$1" != "--help" ]]; then
+    UBUNTU_DISTRIBUTION="$1"
 fi
+
+echo "Using Ubuntu distribution: $UBUNTU_DISTRIBUTION"
 
 # Update package lists
 sudo apt-get update  
 sudo apt-get install -y pkg-config cmake curl libcurl4-openssl-dev libglib2.0-dev libgtest-dev libdbus-1-dev uuid-dev libssl-dev build-essential googletest libtss2-dev libjansson-dev  
-curl -sSL -O https://packages.microsoft.com/config/ubuntu/20.04/packages-microsoft-prod.deb
+curl -sSL -O https://packages.microsoft.com/config/ubuntu/${UBUNTU_DISTRIBUTION}/packages-microsoft-prod.deb
 if [ -f packages-microsoft-prod.deb ]; then
     sudo dpkg -i packages-microsoft-prod.deb
     sudo rm packages-microsoft-prod.deb
@@ -61,7 +74,7 @@ else
 fi
 sudo apt-get update
 sudo apt search symcrypt
-echo "deb https://packages.microsoft.com/ubuntu/20.04/prod testing main" | sudo tee /etc/apt/sources.list.d/microsoft-test.list
+echo "deb https://packages.microsoft.com/ubuntu/${UBUNTU_DISTRIBUTION}/prod testing main" | sudo tee /etc/apt/sources.list.d/microsoft-test.list
 sudo apt-get update
 sudo apt install -y symcrypt
 
