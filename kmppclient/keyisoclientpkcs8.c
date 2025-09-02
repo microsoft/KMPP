@@ -33,18 +33,15 @@
 
 extern CLIENT_MSG_HANDLER_FUNCTIONS_TABLE_ST g_msgHandlerImplementation;
 extern KEYISO_CLIENT_CONFIG_ST g_config;
+extern KEYISO_KEYSINUSE_ST g_keysinuse;
 
-/*
- * Configuration string for creating an X509 certificate containing the public
- * key and signing it with a dummy key for keyId formatting before encoding it
- */
 
 static int _client_common_open(
     const uuid_t correlationId,
     const char* title,
     int pfxLength,
     const unsigned char* pfxBytes,
-    const char* salt,
+    const char *clientData,    // Base64 encoded string
     KEYISO_KEY_CTX** keyCtx)
 {
     int ret = STATUS_FAILED;
@@ -70,7 +67,7 @@ static int _client_common_open(
 
     KEYISOP_trace_log(ctx->correlationId, KEYISOP_TRACELOG_VERBOSE_FLAG, title, "Start");
 
-    ret = g_msgHandlerImplementation.init_key(ctx, pfxLength, pfxBytes, salt);
+    ret = g_msgHandlerImplementation.init_key(ctx, pfxLength, pfxBytes, clientData);
     if (!ret) {
         KEYISOP_trace_log_error(ctx->correlationId, 0, title, "Complete", "Open failed");
         KeyIso_CLIENT_pfx_close(ctx);
@@ -306,7 +303,7 @@ int KeyIso_CLIENT_private_key_open_from_pfx(
     const uuid_t correlationId,
     int pfxLength,
     const unsigned char* pfxBytes,
-    const char* salt,
+    const char  *clientData,    // Base64 encoded string
     KEYISO_KEY_CTX** keyCtx)
 {
     uuid_t randId;
@@ -315,14 +312,14 @@ int KeyIso_CLIENT_private_key_open_from_pfx(
         correlationId = randId;
     }
 
-    KEYISOP_trace_log(correlationId, 0, KEYISOP_OPEN_KEY_TITLE, "start");
+    KEYISOP_trace_log(correlationId, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_OPEN_KEY_TITLE, "start");
 
-    int ret = _client_common_open(correlationId, KEYISOP_OPEN_KEY_TITLE, pfxLength, pfxBytes, salt, keyCtx);
+    int ret = _client_common_open(correlationId, KEYISOP_OPEN_KEY_TITLE, pfxLength, pfxBytes, clientData, keyCtx);
     if (ret != STATUS_OK) {
         return ret;
     }
 
-    KEYISOP_trace_log((*keyCtx)->correlationId, 0, KEYISOP_OPEN_KEY_TITLE, "Complete");
+    KEYISOP_trace_log((*keyCtx)->correlationId, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_OPEN_KEY_TITLE, "Complete");
     return STATUS_OK;
 }
 
@@ -334,73 +331,155 @@ static int _cleanup_import_private_key(
     void *privateKey,
     size_t privateKeySize,
     X509_SIG *encKey,
-    char *salt)
+    KEYISO_CLIENT_DATA_ST *clientDataSt,
+    EVP_PKEY *pubKey)
 {
-    KeyIso_clear_free(privateKey, privateKeySize);
-    if(ret != STATUS_OK) {
-        KeyIso_clear_free_string(salt);
-        X509_SIG_free(encKey);
-        encKey = NULL;
-        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_IMPORT_KEY_TITLE, loc, err);
+    if (privateKey != NULL) {
+        KeyIso_clear_free(privateKey, privateKeySize);
+    }
+    
+    if (clientDataSt != NULL) {
+        KeyIso_free(clientDataSt);
+    }
+    
+    if (pubKey != NULL) {
+        EVP_PKEY_free(pubKey);
+    }
+    
+    if (ret != STATUS_OK) {
+        if (encKey != NULL) {
+            X509_SIG_free(encKey);
+        }
+        if (err != NULL) {
+            KEYISOP_trace_log_error(correlationId, 0, KEYISOP_IMPORT_KEY_TITLE, loc, err);
+        }
     }
 
     return ret;
 }
+#define _CLEANUP_IMPORT_PRIVATE_KEY(ret, loc, err) \
+    _cleanup_import_private_key(ret, correlationId, loc, err, privateKey, privateKeySize, encKey, clientDataSt, pubKey)
 
 int KeyIso_CLIENT_import_private_key( 
     const uuid_t correlationId,
     int keyisoFlags,
     const EVP_PKEY *inPkey,      // PKCS #8 ANS.1 encoded Private Key  
     X509_SIG **outEncryptedPkey, // X509_SIG_free()
-    char **outSalt)              // KeyIso_clear_free_string()
+    char  **outClientData)          // Base64 encoded string
 {
     int ret = STATUS_FAILED;
 
-    char *salt = NULL;
+    KEYISO_CLIENT_DATA_ST  *clientDataSt = NULL;
     void *privateKey = NULL; // KeyIso_clear_free()
     X509_SIG *encKey = NULL;
     int keyType = NID_undef;
     size_t privateKeySize = 0;
+    EVP_PKEY *pubKey = NULL;
+    const char* title = KEYISOP_IMPORT_KEY_TITLE;
 
    
-   if (!outEncryptedPkey || !outSalt) {
-        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_IMPORT_KEY_TITLE, "outEncryptedPkey or outSalt", "output parameter is NULL");
+   if (!outEncryptedPkey || !outClientData) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "outEncryptedPkey or outClientData", "output parameter is NULL");
         return STATUS_FAILED;
     }
     if (!inPkey) {
-        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_IMPORT_KEY_TITLE, "inPkey", "input parameter is NULL");
+        KEYISOP_trace_log_error(correlationId, 0, title, "inPkey", "input parameter is NULL");
         return STATUS_FAILED;
     }
-
+    
     keyType = EVP_PKEY_id(inPkey);
     switch (keyType) {
         case EVP_PKEY_RSA:
         case EVP_PKEY_RSA_PSS:
             privateKey = (void *) KeyIso_export_rsa_epkey(correlationId, inPkey, &privateKeySize);  
+            pubKey = KeyIso_get_rsa_public_key(correlationId, inPkey);
             break;
         case EVP_PKEY_EC:
             privateKey = (void *) KeyIso_export_ec_private_key(correlationId, inPkey, &privateKeySize);
+            pubKey = KeyIso_get_ec_public_key(correlationId, inPkey);
             break;
         default:
-            KEYISOP_trace_log_error(correlationId, 0, KEYISOP_IMPORT_KEY_TITLE, "inPkey", "unsupported key type");
+            KEYISOP_trace_log_error(correlationId, 0, title, "inPkey", "unsupported key type");
     }
 
     if (!privateKey) {
-        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_IMPORT_KEY_TITLE, "privateKey", "parameter is NULL");
+        KEYISOP_trace_log_error(correlationId, 0, title, "privateKey", "parameter is NULL");
         return STATUS_FAILED;
     }
 
-    ret = g_msgHandlerImplementation.import_private_key(correlationId, keyType, (unsigned char *) privateKey, &encKey, &salt);     
+    if(!pubKey) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "pubKey", "parameter is NULL");
+        //return _CLEANUP_IMPORT_PRIVATE_KEY(ret, "pubKey", "parameter is NULL");
+        KeyIso_clear_free(privateKey, privateKeySize);
+        return STATUS_FAILED;
+    }
 
+    ret = g_msgHandlerImplementation.import_private_key(correlationId, keyType, (unsigned char *) privateKey, &encKey, &clientDataSt);     
     if (ret != STATUS_OK)
-        return _cleanup_import_private_key(ret, correlationId, "Complete", "Import failed", privateKey, privateKeySize, encKey, salt);
-    KEYISOP_trace_log(correlationId, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_IMPORT_KEY_TITLE, "Complete");
+        return _CLEANUP_IMPORT_PRIVATE_KEY(ret, "Complete", "Import failed");
+
+    // Encode public key if was not encoded by the service
+    if (clientDataSt->pubKeyLen <= 0) {
+        unsigned char *pubKeyBytes = NULL;
+        KEYISO_CLIENT_DATA_ST *copyClientDataSt = NULL;
+
+        uint32_t pubKeyLen = 0;
+        // ASN.1 encode public key
+        if (KeyIso_encode_public_key_asn1(pubKey, &pubKeyBytes, &pubKeyLen) != STATUS_OK) {
+            return _CLEANUP_IMPORT_PRIVATE_KEY(STATUS_FAILED, "KeyIso_encode_public_key_asn1", "Failed to encode public key");
+        }
+        
+        // use KeyIso_copy_client_data to copy clientDataSt
+        if (KeyIso_copy_client_data(correlationId, clientDataSt->keyIdHeader.keyServiceVersion, clientDataSt->keyIdHeader.isolationSolution, pubKeyLen, pubKeyBytes, &copyClientDataSt) != STATUS_OK) {
+            KeyIso_free(pubKeyBytes);
+            return _CLEANUP_IMPORT_PRIVATE_KEY(STATUS_FAILED, "KeyIso_copy_client_data", "Failed to copy client data");
+        }
+        // Free the allocated memory for pubKeyBytes
+        KeyIso_free(pubKeyBytes);
+        pubKeyBytes = NULL;   
+        // free the old clientDataSt and assign the new clientDataSt
+        KeyIso_free(clientDataSt);
+        clientDataSt = copyClientDataSt;
+    }
+
+    KEYISOP_trace_log(correlationId, KEYISOP_TRACELOG_VERBOSE_FLAG, title, "Complete");
     *outEncryptedPkey = encKey;
-    *outSalt = salt;
+    *outClientData = KeyIso_get_base64_client_data(correlationId, title, clientDataSt);
     
-    return _cleanup_import_private_key(STATUS_OK, correlationId, KEYISOP_IMPORT_KEY_TITLE, "Complete", privateKey, privateKeySize, encKey, salt);
+    return _CLEANUP_IMPORT_PRIVATE_KEY(STATUS_OK, title, "Complete");
 }
 
+static int _cleanup_generate_rsa_key_pair(
+    int ret,
+    X509_SIG *encKey,
+    KEYISO_CLIENT_DATA_ST *clientDataSt,
+    EVP_PKEY *pubKey, 
+    unsigned char *pubKeyBytes)
+{
+    if (ret != STATUS_OK) {
+        // output params - free on failure
+        if (pubKey != NULL) {
+            EVP_PKEY_free(pubKey);
+            pubKey = NULL;
+        }
+        if (encKey != NULL) {
+            X509_SIG_free(encKey);
+            encKey = NULL;
+        }
+    }
+
+    // Free allocated memory
+    if (pubKeyBytes != NULL) {
+        KeyIso_free(pubKeyBytes);
+        pubKeyBytes = NULL;
+    }
+    if (clientDataSt != NULL) {
+        KeyIso_free(clientDataSt);
+        clientDataSt = NULL;
+    }
+    
+    return ret;
+}
 
 int KeyIso_CLIENT_generate_rsa_key_pair(
     const uuid_t correlationId,
@@ -410,34 +489,55 @@ int KeyIso_CLIENT_generate_rsa_key_pair(
     uint32_t nPubExp,
     EVP_PKEY **pubEpkey,
     X509_SIG **encryptedPkey,
-    char **salt)
+    char  **outClientData)    // Base64 encoded string
 {
 	// These parameters are currently not used, but should be supported in provider.
     (void)pubExp64;
     (void) nPubExp;
-    return g_msgHandlerImplementation.generate_rsa_key_pair(correlationId, rsaBits, keyUsage, pubEpkey, encryptedPkey, salt);
-}
 
-static int _cleanup_generate_rsa_key_pair(
-    int ret,
-    const uuid_t correlationId,
-    const char *loc,
-    const char *message,
-    char *salt,
-    EVP_PKEY *pubKmppKey,
-    X509_SIG *encryptedPkey)
-{
-    if (ret != STATUS_OK) {
-        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_GEN_KEY_TITLE, loc, message);
-        KeyIso_clear_free_string(salt);
-        X509_SIG_free(encryptedPkey);
-        EVP_PKEY_free(pubKmppKey);
+    KEYISO_CLIENT_DATA_ST *clientDataSt = NULL;
+    KEYISO_CLIENT_METADATA_HEADER_ST metadata = {0};
+    char *encodedClientData = NULL;
+    unsigned char *pubKeyBytes = NULL;
+    uint32_t pubKeyLen = 0;
+    EVP_PKEY *pkey = NULL;
+    X509_SIG *encPkey = NULL;
+
+    if (!pubEpkey || !encryptedPkey || !outClientData) {
+        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_GEN_KEY_TITLE, "Invalid argument", "Output parameters are NULL");
+        return STATUS_FAILED;
     }
-    return ret;
-}
+    *pubEpkey = NULL;
+    *encryptedPkey = NULL;
+    *outClientData = NULL;
 
-#define _CLEANUP_GENERATE_RSA_KEY_PAIR(ret, loc, message) \
-    _cleanup_generate_rsa_key_pair(ret, correlationId, loc, message, salt, pubEpkey, encryptedPkey)
+    int ret = g_msgHandlerImplementation.generate_rsa_key_pair(correlationId, rsaBits, keyUsage, &pkey, &encPkey, &metadata);
+    if (ret != STATUS_OK) {
+        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_GEN_KEY_TITLE, "Generate key pair", "Failed");
+        return ret;
+    }
+
+    // ASN.1 encode public key
+    if (KeyIso_encode_public_key_asn1(pkey, &pubKeyBytes, &pubKeyLen) != STATUS_OK) {
+        return _cleanup_generate_rsa_key_pair(ret, encPkey, clientDataSt, pkey, pubKeyBytes);
+    }
+
+    // Store encoded public key in client data
+    if (KeyIso_copy_client_data(correlationId, metadata.version, metadata.isolationSolution, pubKeyLen, pubKeyBytes, &clientDataSt) != STATUS_OK) {
+        return _cleanup_generate_rsa_key_pair(STATUS_FAILED, encPkey, clientDataSt, pkey, pubKeyBytes);
+    }
+
+    encodedClientData = KeyIso_get_base64_client_data(correlationId, KEYISOP_GEN_KEY_TITLE, clientDataSt);
+    if (encodedClientData == NULL) {
+        return _cleanup_generate_rsa_key_pair(STATUS_FAILED, encPkey, clientDataSt, pkey, pubKeyBytes);
+    }
+
+    *pubEpkey = pkey;
+    *encryptedPkey = encPkey;
+    *outClientData = encodedClientData;
+
+    return _cleanup_generate_rsa_key_pair(STATUS_OK, encPkey, clientDataSt, pkey, pubKeyBytes);
+}
 
 int KeyIso_CLIENT_generate_rsa_key_pair_conf( 
     const uuid_t correlationId,
@@ -445,10 +545,10 @@ int KeyIso_CLIENT_generate_rsa_key_pair_conf(
     const CONF *conf,
     EVP_PKEY **outPubKey, 
     X509_SIG **outEncryptedPkeyP8,
-    char **outSalt)
+    char **outClientData)
 {
     uuid_t randId;
-    char *salt = NULL;  
+    char  *clientData = NULL;    // Base64 encoded string
     uint8_t keyUsage = KMPP_KEY_USAGE_INVALID;
     EVP_PKEY* pubEpkey = NULL;
     X509_SIG *encryptedPkey = NULL;
@@ -460,61 +560,92 @@ int KeyIso_CLIENT_generate_rsa_key_pair_conf(
         correlationId = randId;
     }
 
-    KEYISOP_trace_log_para(correlationId, 0, KEYISOP_GEN_KEY_TITLE, "Start",
+    KEYISOP_trace_log_para(correlationId, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_GEN_KEY_TITLE, "Start",
         "flags: 0x%x", keyisoFlags);
 
-    if(conf == NULL || outPubKey == NULL || outEncryptedPkeyP8 == NULL || outSalt == NULL)
-        return _CLEANUP_GENERATE_RSA_KEY_PAIR(STATUS_FAILED, "Rsa key generation", "invalid argument");
+    if(conf == NULL || outPubKey == NULL || outEncryptedPkeyP8 == NULL || outClientData == NULL) {
+        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_GEN_KEY_TITLE, "Rsa key generation", "invalid argument");
+        return STATUS_FAILED;
+    }
     *outPubKey = NULL;
     *outEncryptedPkeyP8 = NULL;
-    *outSalt = NULL;
+    *outClientData = NULL;
 
     ret =_get_rsa_param(correlationId, conf, &rsaBits);
     if (ret != STATUS_OK) {
-        return _CLEANUP_GENERATE_RSA_KEY_PAIR(STATUS_FAILED, "_get_rsa_param", "Failed");
+        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_GEN_KEY_TITLE, "_get_rsa_param", "Failed");
+        return ret;
     }
 
     ret = _get_key_usage(correlationId, KEYISOP_GEN_KEY_TITLE, keyisoFlags, conf, &keyUsage);
     if (ret != STATUS_OK) {
-        return _CLEANUP_GENERATE_RSA_KEY_PAIR(STATUS_FAILED, "keyUsage", "Failed");
+        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_GEN_KEY_TITLE, "keyUsage", "Failed");
+        return ret;
     }
     
 
-    ret = KeyIso_CLIENT_generate_rsa_key_pair(correlationId, rsaBits, keyUsage, 0, 0, &pubEpkey, &encryptedPkey, &salt);
+    ret = KeyIso_CLIENT_generate_rsa_key_pair(correlationId, rsaBits, keyUsage, 0, 0, &pubEpkey, &encryptedPkey, &clientData);
     if (ret != STATUS_OK) {
-        return _CLEANUP_GENERATE_RSA_KEY_PAIR(STATUS_FAILED, "Generate key pair", "Failed");
+        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_GEN_KEY_TITLE, "Generate key pair", "Failed");
+        return ret;
     }
 
     *outPubKey = pubEpkey;
     *outEncryptedPkeyP8 = encryptedPkey;
-    *outSalt = salt;
-    KEYISOP_trace_log(correlationId, 0, KEYISOP_GEN_KEY_TITLE, "Complete");
-    return _CLEANUP_GENERATE_RSA_KEY_PAIR(STATUS_OK, NULL, NULL);
+    *outClientData = clientData;
+
+    KEYISOP_trace_log(correlationId, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_GEN_KEY_TITLE, "Complete");
+    return STATUS_OK;
 }
 
 int _cleanup_generate_ec_key_pair(
      int ret,
      const uuid_t correlationId,
      const char *message,
-     char *salt,
-     X509_SIG *encKey,
+     char  *clientData,    // Base64 encoded string
+     X509_SIG *encryptedKey,
      EC_GROUP *ecGroup,
-     EC_KEY *ecKey)
+     EC_KEY *pubEckey,
+     unsigned char *pubKeyBytes,       
+     KEYISO_CLIENT_DATA_ST *clientDataSt, 
+     EVP_PKEY *pubEpkey)              
 {
-    if (ret != STATUS_OK) {
-        EC_KEY_free(ecKey);
-        EC_GROUP_free(ecGroup);
-        X509_SIG_free(encKey);
-        KeyIso_clear_free_string(salt);
-        KEYISOP_trace_log_openssl_error(correlationId, 0, KEYISOP_GEN_KEY_TITLE, message);
+    if (pubKeyBytes != NULL) {
+        KeyIso_free(pubKeyBytes);
+    }
+    if (clientDataSt != NULL) {
+        KeyIso_free(clientDataSt);
+    }
+    if (pubEpkey != NULL) {
+        EVP_PKEY_free(pubEpkey);
+    }
+    
+    if (ret != STATUS_OK) {    
+        if (pubEckey != NULL) {
+            EC_KEY_free(pubEckey);
+        }
+        if (ecGroup != NULL) {
+            EC_GROUP_free(ecGroup);
+        }
+        if (encryptedKey != NULL) {
+            X509_SIG_free(encryptedKey);
+        }
+        if (clientData != NULL) {
+            KeyIso_clear_free_string(clientData);
+        }
+        if (message != NULL) {
+            KEYISOP_trace_log_openssl_error(correlationId, 0, KEYISOP_GEN_KEY_TITLE, message);
+        }
     } else {
-        KEYISOP_trace_log(correlationId, 0, KEYISOP_GEN_KEY_TITLE, message);
+        if (message != NULL) {
+            KEYISOP_trace_log(correlationId, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_GEN_KEY_TITLE, message);
+        }
     }
     return ret;
 }
 
 #define _CLEANUP_GENERATE_EC_KEY_PAIR(ret, message) \
-    _cleanup_generate_ec_key_pair(ret, correlationId, message, salt, encryptedKey, ecGroup, pubEckey)
+    _cleanup_generate_ec_key_pair(ret, correlationId, message, clientData, encryptedKey, ecGroup, pubEckey, pubKeyBytes, clientDataSt, pubEpkey)
 
 int KeyIso_CLIENT_generate_ec_key_pair( 
     const uuid_t correlationId,
@@ -523,9 +654,9 @@ int KeyIso_CLIENT_generate_ec_key_pair(
     EC_GROUP **outEcGroup,
     EC_KEY **outPubKey, 
     X509_SIG **outEncryptedPkey,
-    char **outSalt)
+    char **outClientData)
 {
-    char *salt = NULL;  
+    char *clientData = NULL;  
     uint8_t keyUsage = KMPP_KEY_USAGE_INVALID;
     uuid_t randId;
     EC_GROUP *ecGroup = NULL;
@@ -534,21 +665,27 @@ int KeyIso_CLIENT_generate_ec_key_pair(
     int ret = STATUS_FAILED;
     unsigned int curve;
     
+    KEYISO_CLIENT_DATA_ST  *clientDataSt = NULL;
+    KEYISO_CLIENT_METADATA_HEADER_ST metadata = {0};
+    unsigned char *pubKeyBytes = NULL;
+    uint32_t pubKeyLen = 0;
+    EVP_PKEY* pubEpkey = NULL;
+    
     if (correlationId == NULL) {
         KeyIso_rand_bytes(randId, sizeof(randId));
         correlationId = randId;
     }
 
-    KEYISOP_trace_log_para(correlationId, 0, KEYISOP_GEN_KEY_TITLE, "Start",
+    KEYISOP_trace_log_para(correlationId, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_GEN_KEY_TITLE, "Start",
         "flags: 0x%x", keyisoFlags);
     
-    if(conf == NULL || outPubKey == NULL || outEncryptedPkey == NULL || outSalt == NULL || outEcGroup == NULL) {
+    if(conf == NULL || outPubKey == NULL || outEncryptedPkey == NULL || outClientData == NULL || outEcGroup == NULL) {
         return _CLEANUP_GENERATE_EC_KEY_PAIR(ret, "Invalid argument");
     }
 
     *outPubKey = NULL;
     *outEncryptedPkey = NULL;
-    *outSalt = NULL;
+    *outClientData = NULL;
     *outPubKey = NULL;
     *outEcGroup = NULL;
 
@@ -561,20 +698,45 @@ int KeyIso_CLIENT_generate_ec_key_pair(
     if (ret != STATUS_OK) {
         return _CLEANUP_GENERATE_EC_KEY_PAIR(STATUS_FAILED, "_get_key_usage failed");
     }
-    
-    ret = g_msgHandlerImplementation.generate_ec_key_pair(correlationId, curve, keyUsage, &ecGroup, &pubEckey, &encryptedKey, &salt);
-           
+
+    ret = g_msgHandlerImplementation.generate_ec_key_pair(correlationId, curve, keyUsage, &ecGroup, &pubEckey, &encryptedKey, &metadata);
     if (ret != STATUS_OK) {
         return _CLEANUP_GENERATE_EC_KEY_PAIR(STATUS_FAILED, "Generate key pair");
     }
+    
+    // CB-CHANGES: create evp_pkey from ec_key
+    //TEMP here! should be moved to _copy_ec_key_generate_values and returned as EVP_PKEY
+    // Set the EC_KEY as the public key for the EVP_PKEY
+    pubEpkey = EVP_PKEY_new();
+    if (pubEpkey == NULL) {
+        return _CLEANUP_GENERATE_EC_KEY_PAIR(STATUS_FAILED, "EVP_PKEY_new failed");
+    }
+    
+    if (EVP_PKEY_set1_EC_KEY(pubEpkey, pubEckey) != 1) {
+        return _CLEANUP_GENERATE_EC_KEY_PAIR(STATUS_FAILED, "EVP_PKEY_set1_EC_KEY");
+    }
+    
+    // ASN.1 encode public key
+    if (KeyIso_encode_public_key_asn1(pubEpkey, &pubKeyBytes, &pubKeyLen) != STATUS_OK) {
+        return _CLEANUP_GENERATE_EC_KEY_PAIR(STATUS_FAILED, "KeyIso_encode_public_key_asn1 failed");
+    }
 
+    // Store encoded public key in client data
+    if (KeyIso_copy_client_data(correlationId, metadata.version, metadata.isolationSolution, pubKeyLen, pubKeyBytes, &clientDataSt) != STATUS_OK) {
+        return _CLEANUP_GENERATE_EC_KEY_PAIR(STATUS_FAILED, "KeyIso_copy_client_data failed");
+    }
+
+    clientData = KeyIso_get_base64_client_data(correlationId, KEYISOP_GEN_KEY_TITLE, clientDataSt);
+    if (clientData == NULL) {
+        return _CLEANUP_GENERATE_EC_KEY_PAIR(STATUS_FAILED, "Base64 client data failed");
+    }
+           
     *outPubKey = pubEckey;
     *outEcGroup = ecGroup;
     *outEncryptedPkey = encryptedKey;
-    *outSalt = salt;
+    *outClientData = clientData;
     return _CLEANUP_GENERATE_EC_KEY_PAIR(STATUS_OK, "Complete");
 }
-
 static int _cleanup_import_pfx_private_key(
     int ret,
     const char *loc,
@@ -586,15 +748,19 @@ static int _cleanup_import_pfx_private_key(
     STACK_OF(X509) *outCa,
     X509_SIG *p8)
 {
-    if (!ret) {
-        KEYISOP_trace_log_error(NULL, 0, KEYISOP_IMPORT_PFX_TITLE, loc, err);
-        KEYISOP_trace_metric_error_para(NULL, 0, g_config.solutionType, KEYISOP_IMPORT_PFX_TITLE, loc, "Import failed.", "sha256:%s", sha256HexHash);
-        X509_SIG_free(p8);   // should not be freed at success 
-    }
     EVP_PKEY_free(pkey);
     X509_free(cert);
     sk_X509_pop_free(inCa, X509_free);
     sk_X509_pop_free(outCa, X509_free);
+    
+    if (!ret) {
+        X509_SIG_free(p8);
+        if (loc != NULL && err != NULL) {
+            KEYISOP_trace_log_error(NULL, 0, KEYISOP_IMPORT_PFX_TITLE, loc, err);
+            KEYISOP_trace_metric_error_para(NULL, 0, g_config.solutionType, g_keysinuse.isLibraryLoaded, KEYISOP_IMPORT_PFX_TITLE, loc, "Import failed.", "sha256:%s", sha256HexHash);
+        }
+    }
+    
     return ret;
 }
 
@@ -607,21 +773,21 @@ int KeyIso_CLIENT_import_private_key_from_pfx(
     int *outVerifyChainError,
     int *outPfxLength,
     unsigned char **outPfxBytes,                // KeyIso_free()
-    char **outPfxSalt)                          // KeyIso_free()
+    char **outClientData)
 {
     const char *title = KEYISOP_IMPORT_PFX_TITLE;
     int ret = STATUS_FAILED;
 
     int buildPfxCaRet = 0;
     uuid_t randId;
-    char *salt = NULL;
+    char *clientData = NULL;
     X509_SIG *p8 = NULL;
     EVP_PKEY *inPfxPkey = NULL;
     X509 *inPfxCert = NULL;
     STACK_OF(X509) *inPfxCa = NULL;
     STACK_OF(X509) *outPfxCa = NULL;
 
-    if (!outVerifyChainError || !outPfxLength || !outPfxBytes || !outPfxSalt) {
+    if (!outVerifyChainError || !outPfxLength || !outPfxBytes || !outClientData) {
         KEYISOP_trace_log_error(correlationId, 0, KEYISOP_IMPORT_PFX_TITLE, "Failed", "Missing output parameters");
         return STATUS_FAILED;
     }
@@ -629,7 +795,7 @@ int KeyIso_CLIENT_import_private_key_from_pfx(
     *outVerifyChainError = 0;
     *outPfxLength = 0;
     *outPfxBytes = NULL;
-    *outPfxSalt = NULL;
+    *outClientData = NULL;
 
     char sha256HexHash[SHA256_DIGEST_LENGTH * 2 + 1];
 
@@ -638,7 +804,7 @@ int KeyIso_CLIENT_import_private_key_from_pfx(
         correlationId = randId;
     }
 
-    KEYISOP_trace_log_para(correlationId, 0, title, "Start", "flags: 0x%x, solutionType: %d, isDefaultConfig: %d", keyisoFlags, g_config.solutionType, g_config.isDefaultSolutionType);
+    KEYISOP_trace_log_para(correlationId, KEYISOP_TRACELOG_VERBOSE_FLAG, title, "Start", "flags: 0x%x, solutionType: %d, isDefaultConfig: %d", keyisoFlags, g_config.solutionType, g_config.isDefaultSolutionType);
 
     ERR_clear_error();
 
@@ -690,23 +856,23 @@ int KeyIso_CLIENT_import_private_key_from_pfx(
         keyisoFlags, 
         inPfxPkey,
         &p8,
-        &salt);
+        &clientData);
     if (ret != STATUS_OK)
         return _cleanup_import_pfx_private_key(ret, "KeyIso_CLIENT_import_private_key", "Failed", sha256HexHash, inPfxPkey, inPfxCert, inPfxCa, outPfxCa, p8);
 
     // creating encrypted pfx
     ret = KeyIso_create_encrypted_pfx_bytes(correlationId, p8, inPfxCert, inPfxCa, outPfxLength, outPfxBytes);
     if (ret != STATUS_OK) {
-        KeyIso_clear_free_string(salt);
-        salt = NULL;
+        KeyIso_clear_free_string(clientData);
+        clientData = NULL;
         return _cleanup_import_pfx_private_key(ret, "KeyIso_create_encrypted_pfx_bytes", "Failed", sha256HexHash, inPfxPkey, inPfxCert, inPfxCa, outPfxCa, p8);
     }
 
     // Print metric of the imported key.
     char usageStr[64];
     _get_usage_string_from_keyiso_flags(keyisoFlags, usageStr, sizeof(usageStr));
-    KEYISOP_trace_metric_para(correlationId, 0, g_config.solutionType, title, NULL,"Key import succeeded. sha256: %s. Usage: <%s>", sha256HexHash, usageStr);
-    *outPfxSalt = salt;
+    KEYISOP_trace_metric_para(correlationId, 0, g_config.solutionType, g_keysinuse.isLibraryLoaded, title, NULL,"Key import succeeded. sha256: %s. Usage: <%s>", sha256HexHash, usageStr);
+    *outClientData = clientData;
     
     ret = buildPfxCaRet;
     if (ret < 0) {
@@ -730,9 +896,20 @@ static int _cleanup_self_sign_key_generation(
         KEYISOP_trace_log_error(correlationId, 0, title, NULL, errStr);
     }
 
-    EVP_PKEY_free(generatedPubKey);
-    EC_GROUP_free(generatedEccGroup);
-    EC_KEY_free(generatedEccPubKey);
+    if (generatedPubKey != NULL) {
+        EVP_PKEY_free(generatedPubKey);
+        generatedPubKey = NULL;
+    }
+
+    if (generatedEccGroup != NULL) {
+        EC_GROUP_free(generatedEccGroup);
+        generatedEccGroup = NULL;
+    }
+
+    if (generatedEccPubKey != NULL) {
+        EC_KEY_free(generatedEccPubKey);
+        generatedEccPubKey = NULL;
+    }
 
     return status;
 }
@@ -741,7 +918,7 @@ int _create_self_sign_key_generation(
     const uuid_t correlationId,
     const int keyType,
     const int keyisoFlags,
-    char **pfxSalt,
+    char **outClientData,
     const CONF* conf,
     X509 *cert,
     X509_SIG **generatedEncryptedPkey)
@@ -752,12 +929,12 @@ int _create_self_sign_key_generation(
     EC_KEY *generatedEccPubKey = NULL;
 
     if (keyType == EVP_PKEY_RSA) {
-        if (KeyIso_CLIENT_generate_rsa_key_pair_conf(correlationId, keyisoFlags, conf, &generatedPubKey, generatedEncryptedPkey, pfxSalt) != STATUS_OK) {
+        if (KeyIso_CLIENT_generate_rsa_key_pair_conf(correlationId, keyisoFlags, conf, &generatedPubKey, generatedEncryptedPkey, outClientData) != STATUS_OK) {
             return _cleanup_self_sign_key_generation(correlationId, STATUS_FAILED, "Failed to generate rsa key pair", generatedPubKey, generatedEccGroup, generatedEccPubKey);
         }
 
     } else if (keyType == EVP_PKEY_EC) {
-        if (KeyIso_CLIENT_generate_ec_key_pair(correlationId, keyisoFlags, conf, &generatedEccGroup, &generatedEccPubKey, generatedEncryptedPkey, pfxSalt) != STATUS_OK) {
+        if (KeyIso_CLIENT_generate_ec_key_pair(correlationId, keyisoFlags, conf, &generatedEccGroup, &generatedEccPubKey, generatedEncryptedPkey, outClientData) != STATUS_OK) {
             return _cleanup_self_sign_key_generation(correlationId, STATUS_FAILED, "Failed to generate ecc key pair", generatedPubKey, generatedEccGroup, generatedEccPubKey);
         }
         // Create the public key from the EC_KEY
@@ -827,7 +1004,7 @@ static int _sign_cert(const uuid_t correlationId, const CONF* conf, X509 *cert, 
 * In addition, to ensure consistency between the engine and provider, the function name will be changed
 * to KeyIso_conf_sign with the additional arguments.
 */
-    if (KeyIso_conf_cert_sign_prov(correlationId, conf, cert, pKey, NULL, "provider=default") != STATUS_OK) {
+    if (KeyIso_conf_cert_sign_prov(correlationId, conf, cert, pKey, NULL, KMPP_OSSL_PROVIDER_DEFAULT) != STATUS_OK) {
         KEYISOP_trace_log_error(correlationId, 0, KEYISOP_CREATE_SELF_SIGN_TITLE, NULL, "Failed to sign cert with provider");
         return STATUS_FAILED;
     }
@@ -876,7 +1053,7 @@ int _create_self_sign_key_handle(
     const uuid_t correlationId,
     X509_SIG *generatedEncryptedPkey,
     X509 *cert,
-    const char *pfxSalt,
+    const char *clientData,
     char **encryptedKeyId)
 {
     const char *title = KEYISOP_CREATE_SELF_SIGN_TITLE;
@@ -888,7 +1065,7 @@ int _create_self_sign_key_handle(
         KEYISOP_trace_log_error(correlationId, 0, title, NULL, "creating encrypted PFX failed");
         return STATUS_FAILED;
     }
-    if (!KeyIso_format_pfx_engine_key_id(correlationId, encryptedPfxLength, encryptedPfxBytes, pfxSalt, encryptedKeyId)) {
+    if (!KeyIso_format_pfx_engine_key_id(correlationId, encryptedPfxLength, encryptedPfxBytes, clientData, encryptedKeyId)) {
         KeyIso_free(encryptedPfxBytes);
         KEYISOP_trace_log_error(correlationId, 0, title, NULL, "KeyIso_format_pfx_engine_key_id_ex failed");
         return STATUS_FAILED;
@@ -904,16 +1081,35 @@ static int _cleanup_create_self_sign_pfx_p8(
     const char *errStr,
     X509 *cert,
     char *encryptedKeyId,
-    CONF *conf)
+    CONF *conf,
+    X509_SIG *pkcs8Signature,
+    X509_SIG *generatedEncryptedPkey)
 {
     const char *title = KEYISOP_CREATE_SELF_SIGN_TITLE;
     if (status != STATUS_OK) {
         KEYISOP_trace_log_error(correlationId, 0, title, NULL, errStr);
     }
 
-    X509_free(cert);
-    KeyIso_clear_free_string(encryptedKeyId);
-    NCONF_free(conf);
+    if (cert != NULL) {
+        X509_free(cert);
+        cert = NULL;
+    }
+    if (encryptedKeyId != NULL) {
+        KeyIso_clear_free_string(encryptedKeyId);
+        encryptedKeyId = NULL;
+    }
+    if (conf != NULL) {
+        NCONF_free(conf);
+        conf = NULL;
+    }
+    if (pkcs8Signature != NULL) {
+        X509_SIG_free(pkcs8Signature);
+        pkcs8Signature = NULL;
+    }
+    if (generatedEncryptedPkey != NULL) {
+        X509_SIG_free(generatedEncryptedPkey);
+        generatedEncryptedPkey = NULL;
+    }
 
     return status;
 }
@@ -950,7 +1146,7 @@ int KeyIso_CLIENT_create_self_sign_pfx_p8(
     const char *confStr,
     int *pfxLength,
     unsigned char **pfxBytes,
-    char **pfxSalt)
+    char **outClientData)
 {
     const char *title = KEYISOP_CREATE_SELF_SIGN_TITLE;
     CONF *conf = NULL;
@@ -962,28 +1158,28 @@ int KeyIso_CLIENT_create_self_sign_pfx_p8(
 
     *pfxLength = 0;
     *pfxBytes = NULL;
-    *pfxSalt = NULL;
+    *outClientData = NULL;
     char sha256HexHash[SHA256_DIGEST_LENGTH * 2 + 1] = "\0";
 
-    KEYISOP_trace_log_para(correlationId, 0, title, "Start", "flags: 0x%x, solutionType: %d, isDefaultConfig: %d", keyisoFlags, g_config.solutionType, g_config.isDefaultSolutionType);
+    KEYISOP_trace_log_para(correlationId, KEYISOP_TRACELOG_VERBOSE_FLAG, title, "Start", "flags: 0x%x, solutionType: %d, isDefaultConfig: %d", keyisoFlags, g_config.solutionType, g_config.isDefaultSolutionType);
 
     ERR_clear_error();
 
     // confStr parsing
     if (KeyIso_conf_load(correlationId, confStr, &conf) != STATUS_OK) {
-        return _cleanup_create_self_sign_pfx_p8(correlationId, STATUS_FAILED, "Failed to load configuration", cert, encryptedKeyId, conf);
+        return _cleanup_create_self_sign_pfx_p8(correlationId, STATUS_FAILED, "Failed to load configuration", cert, encryptedKeyId, conf, pkcs8Signature, generatedEncryptedPkey);
     }
 
     // get key type and validate
     keyType = _get_type_by_name(correlationId, conf);
     if (keyType != EVP_PKEY_RSA && keyType != EVP_PKEY_EC) {
-        return _cleanup_create_self_sign_pfx_p8(correlationId, STATUS_FAILED, "Invalid key_type", cert, encryptedKeyId, conf);
+        return _cleanup_create_self_sign_pfx_p8(correlationId, STATUS_FAILED, "Invalid key_type", cert, encryptedKeyId, conf, pkcs8Signature, generatedEncryptedPkey);
     }
 
     // key generation
     cert = X509_new();
-    if (_create_self_sign_key_generation(correlationId, keyType, keyisoFlags, pfxSalt, conf, cert, &generatedEncryptedPkey) != STATUS_OK) {
-        return _cleanup_create_self_sign_pfx_p8(correlationId, STATUS_FAILED, "Failed to generate key", cert, encryptedKeyId, conf);
+    if (_create_self_sign_key_generation(correlationId, keyType, keyisoFlags, outClientData, conf, cert, &generatedEncryptedPkey) != STATUS_OK) {
+        return _cleanup_create_self_sign_pfx_p8(correlationId, STATUS_FAILED, "Failed to generate key", cert, encryptedKeyId, conf, pkcs8Signature, generatedEncryptedPkey);
     }
 
     // Extract sha256 string out of the public key of the cert.
@@ -991,40 +1187,40 @@ int KeyIso_CLIENT_create_self_sign_pfx_p8(
 
     // cert configuration
     if (_create_self_sign_cert_configuration(correlationId, conf, cert) != STATUS_OK) {
-        return _cleanup_create_self_sign_pfx_p8(correlationId, STATUS_FAILED, "Failed to configure cert", cert, encryptedKeyId, conf);
+        return _cleanup_create_self_sign_pfx_p8(correlationId, STATUS_FAILED, "Failed to configure cert", cert, encryptedKeyId, conf, pkcs8Signature, generatedEncryptedPkey);
     }
 
     // Duplicate the encrypted key, to be used for signing
     pkcs8Signature = X509_SIG_new();
     if (KeyIso_x509_sig_dup(generatedEncryptedPkey, pkcs8Signature) != STATUS_OK) {
-        return _cleanup_create_self_sign_pfx_p8(correlationId, STATUS_FAILED, "X509_SIG_dup failed", cert, encryptedKeyId, conf);
+        return _cleanup_create_self_sign_pfx_p8(correlationId, STATUS_FAILED, "X509_SIG_dup failed", cert, encryptedKeyId, conf, pkcs8Signature, generatedEncryptedPkey);
     }
 
     // Dummy key sign - for signing the cert temporary, this will allow to load the pfx to the engine
     if (_create_self_sign_dummy_sign(correlationId, keyType, conf, cert) != STATUS_OK) {
-        return _cleanup_create_self_sign_pfx_p8(correlationId, STATUS_FAILED, "KeyIso_create_self_sign_dummy_sign failed", cert, encryptedKeyId, conf);
+        return _cleanup_create_self_sign_pfx_p8(correlationId, STATUS_FAILED, "KeyIso_create_self_sign_dummy_sign failed", cert, encryptedKeyId, conf, pkcs8Signature, generatedEncryptedPkey);
     }
 
     // create key handle from the encrypted key
-    if (_create_self_sign_key_handle(correlationId, generatedEncryptedPkey, cert, *pfxSalt, &encryptedKeyId) != STATUS_OK) {
-        return _cleanup_create_self_sign_pfx_p8(correlationId, STATUS_FAILED, "KeyIso_create_key_handle_from_encrypted_key failed", cert, encryptedKeyId, conf);
+    if (_create_self_sign_key_handle(correlationId, generatedEncryptedPkey, cert, *outClientData, &encryptedKeyId) != STATUS_OK) {
+        return _cleanup_create_self_sign_pfx_p8(correlationId, STATUS_FAILED, "KeyIso_create_key_handle_from_encrypted_key failed", cert, encryptedKeyId, conf, pkcs8Signature, generatedEncryptedPkey);
     }
 
     if (KeyIso_cert_sign(correlationId, conf, cert, encryptedKeyId) != STATUS_OK) {
-        return _cleanup_create_self_sign_pfx_p8(correlationId, STATUS_FAILED, "KeyIso_cert_sign_engine failed", cert, encryptedKeyId, conf);
+        return _cleanup_create_self_sign_pfx_p8(correlationId, STATUS_FAILED, "KeyIso_cert_sign_engine failed", cert, encryptedKeyId, conf, pkcs8Signature, NULL);  // NOTE: generatedEncryptedPkey ownership is now belong to openssl so dont free and send null
     }
 
     // Create the final pfx with the signed cert
     if (KeyIso_create_encrypted_pfx_bytes(correlationId, pkcs8Signature, cert, NULL, pfxLength, pfxBytes) != STATUS_OK) {
-        return _cleanup_create_self_sign_pfx_p8(correlationId, STATUS_FAILED, "creating encrypted PFX failed", cert, encryptedKeyId, conf);
+        return _cleanup_create_self_sign_pfx_p8(correlationId, STATUS_FAILED, "creating encrypted PFX failed", cert, encryptedKeyId, conf, pkcs8Signature, NULL); // NOTE: generatedEncryptedPkey ownership is now belong to openssl so dont free and send null
     }
 
     char usageStr[64];
     _get_usage_string_from_keyiso_flags(keyisoFlags, usageStr, sizeof(usageStr));
-    KEYISOP_trace_metric_para(correlationId, 0, g_config.solutionType, title, NULL,"create_self_sign_pfx succeeded. sha256: %s. Usage: <%s>", sha256HexHash, usageStr);
+    KEYISOP_trace_metric_para(correlationId, 0, g_config.solutionType, g_keysinuse.isLibraryLoaded, title, NULL,"create_self_sign_pfx succeeded. sha256: %s. Usage: <%s>", sha256HexHash, usageStr);
 
-    KEYISOP_trace_log(correlationId, 0, title, "Complete");
-    return _cleanup_create_self_sign_pfx_p8(correlationId, STATUS_OK, NULL, cert, encryptedKeyId, conf);
+    KEYISOP_trace_log(correlationId, KEYISOP_TRACELOG_VERBOSE_FLAG, title, "Complete");
+    return _cleanup_create_self_sign_pfx_p8(correlationId, STATUS_OK, NULL, cert, encryptedKeyId, conf, NULL, NULL);
 }
 
 
@@ -1100,8 +1296,12 @@ static int _cleanup_replace_pfx_certs_p8(
     EVP_PKEY_free(pkey2);
     X509_free(cert);
     sk_X509_pop_free(ca, X509_free);
-    if (ret != STATUS_OK)
+    
+    // Only free p8 on failure
+    if (ret != STATUS_OK) {
         X509_SIG_free(p8);
+    }
+    
     return ret;
 }
 
@@ -1172,14 +1372,16 @@ int KeyIso_replace_pfx_certs_p8(
 static void _client_validate_keyid_cleanup(
     const uuid_t correlationId,
     unsigned char *pfxBytes, 
-    char *salt,
+    char *clientData,
     const char *errorReason)
 {
     if (pfxBytes != NULL) {
         KeyIso_free(pfxBytes);
+        pfxBytes = NULL;
     }
-    if (salt != NULL) {
-        KeyIso_clear_free_string(salt);
+    if (clientData != NULL) {
+        KeyIso_clear_free_string(clientData);
+        clientData = NULL;
     }
     if (errorReason != NULL) {
         KEYISOP_trace_log_error(correlationId, 0, KEYISOP_VALIDATE_KEY_TITLE, errorReason, "Failed");
@@ -1194,7 +1396,7 @@ int KeyIso_validate_keyid(
     KEYISO_KEY_CTX *keyCtx = NULL;     // KeyIso_CLIENT_pfx_close()
     int pfxLength = 0;
     unsigned char *pfxBytes = NULL;     // KeyIso_free()
-    char *salt = NULL;
+    char *clientData = NULL;
     uuid_t randId;
 
     if (keyId == NULL) {
@@ -1207,31 +1409,31 @@ int KeyIso_validate_keyid(
         correlationId = randId;
     }
     
-    KEYISOP_trace_log(correlationId, 0, KEYISOP_VALIDATE_KEY_TITLE, "Start");
+    KEYISOP_trace_log(correlationId, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_VALIDATE_KEY_TITLE, "Start");
 
-    ret = KeyIso_parse_pfx_engine_key_id(correlationId, keyId, &pfxLength, &pfxBytes, &salt);
+    ret = KeyIso_parse_pfx_engine_key_id(correlationId, keyId, &pfxLength, &pfxBytes, &clientData);
     if (ret != STATUS_OK) {
         KeyIso_CLIENT_pfx_close(keyCtx);
-        _client_validate_keyid_cleanup(correlationId, pfxBytes, salt, "KeyIso_parse_pfx_engine_key_id");
+        _client_validate_keyid_cleanup(correlationId, pfxBytes, clientData, "KeyIso_parse_pfx_engine_key_id");
         return ret;
     }
 
-    ret = _client_common_open(correlationId, KEYISOP_VALIDATE_KEY_TITLE, pfxLength, pfxBytes, salt, &keyCtx);
+    ret = _client_common_open(correlationId, KEYISOP_VALIDATE_KEY_TITLE, pfxLength, pfxBytes, clientData, &keyCtx);
     if (ret != STATUS_OK) {
         KeyIso_CLIENT_pfx_close(keyCtx);
-        _client_validate_keyid_cleanup(correlationId, pfxBytes, salt, "_client_common_open");
+        _client_validate_keyid_cleanup(correlationId, pfxBytes, clientData, "_client_common_open");
         return ret;
     }
 
     ret = KeyIso_client_open_priv_key_message(keyCtx);
     if (ret != STATUS_OK) {
         KeyIso_CLIENT_pfx_close(keyCtx);
-        _client_validate_keyid_cleanup(correlationId, pfxBytes, salt, "KeyIso_client_open_priv_key_message");
+        _client_validate_keyid_cleanup(correlationId, pfxBytes, clientData, "KeyIso_client_open_priv_key_message");
         return ret;
     }
 
-    KEYISOP_trace_log(keyCtx->correlationId, 0, KEYISOP_VALIDATE_KEY_TITLE, "Complete");
+    KEYISOP_trace_log(keyCtx->correlationId, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_VALIDATE_KEY_TITLE, "Complete");
     KeyIso_CLIENT_pfx_close(keyCtx);
-    _client_validate_keyid_cleanup(correlationId, pfxBytes, salt, NULL);
+    _client_validate_keyid_cleanup(correlationId, pfxBytes, clientData, NULL);
     return STATUS_OK;
 }

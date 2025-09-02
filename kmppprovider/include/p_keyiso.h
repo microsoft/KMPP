@@ -29,7 +29,11 @@ extern "C" {
 /** Names **/
 #define KEYISO_PROV_KEYMGMT_NAME_RSA	       "RSA:rsaEncryption"
 #define KEYISO_PROV_KEYMGMT_NAME_RSA_PSS	   "RSA-PSS:RSASSA-PSS"
+#define KEYISO_PROV_KEYMGMT_NAME_EC            "EC:id-ecPublicKey"
+
 #define KEYISO_PROV_SIGN_NAME_RSA		       "RSA:rsaSignature"
+#define KEYISO_PROV_SIGN_NAME_ECDSA		       "ECDSA"
+
 #define KEYISO_PROV_ASYM_CIPHER_NAME_RSA       "RSA:rsaEncryption"
 
 #define KEYISO_NAME_RSA						   "RSA"
@@ -37,6 +41,7 @@ extern "C" {
 #define KEYISO_NAME_EC					       "EC"
 #define KEYISO_NAME_DSA					       "DSA"
 #define KEYISO_NAME_ECDSA					   "ECDSA"
+#define KEYISO_NAME_ECDH		            "ECDH"
 
 /** PEM Support **/
 #define KEYISO_NAME_PEM                        "PEM"
@@ -94,7 +99,6 @@ struct KeyIso_prov_pkey_st {
     *  RSA and RSA-PSS key types during key generation)
     */
     unsigned int keyType;
-    void *keysInUseCtx; //An opaque handle for the keys in use context
 };
 
 typedef struct KeyIso_prov_rsa_md_info_st KEYISO_PROV_RSA_MD_INFO_CTX;
@@ -120,14 +124,32 @@ struct KeyIso_prov_rsa_ctx_st {
 
 typedef struct KeyIso_prov_rsa_gen_ctx_st KEYISO_PROV_RSA_GEN_CTX;
 struct KeyIso_prov_rsa_gen_ctx_st {
-    KEYISO_PROV_PKEY              *provKey;
+    KEYISO_PROV_PROVCTX           *provCtx;
     uint32_t                      nBitsOfModulus;
     uint64_t                      pubExp64;
     uint32_t                      nPubExp;
-    unsigned int                  padding;	
+    unsigned int                  keyType;	
 	KEYISO_PROV_RSA_MD_INFO_CTX  *pssInfo;
 };
 
+/* ECC Structures */
+typedef struct KeyIso_prov_ecc_gen_ctx_st KEYISO_PROV_ECC_GEN_CTX;
+struct KeyIso_prov_ecc_gen_ctx_st {
+    KEYISO_PROV_PROVCTX* provCtx;
+    int curveNid;  // NID for the selected curve
+};
+
+typedef struct KeyIso_prov_ecsdsa_ctx_st KEYISO_PROV_ECDSA_CTX;
+struct KeyIso_prov_ecsdsa_ctx_st {
+    KEYISO_PROV_PKEY *provKey;
+    EVP_MD_CTX *mdCtx;
+    EVP_MD *md;
+    const OSSL_ITEM *mdInfo;
+    size_t mdSize;
+    int operation;
+};
+
+/* Store Structures */
 typedef enum {
     KeyisoProvStoreStatus_unloaded = 0,
     KeyisoProvStoreStatus_failed,
@@ -142,21 +164,88 @@ struct keyiso_prov_store_ctx_st {
     KeyisoProvStoreStatus       status;
 };
 
-/** Common declarations **/
-extern const OSSL_ITEM g_keyIsoPovSupportedMds[];
 
-int KeyIso_conf_get(
-    CONF **conf,
-    const char *dns1,
-    const char *dns2);
+/** Common function for both RSA and ECC **/
+int KeyIso_create_key_object(    
+    KEYISO_PROV_PROVCTX *provCtx, 
+    KEYISO_KEY_CTX *keyCtx, 
+    EVP_PKEY *pubKey, 
+    OSSL_CALLBACK *objectCb, 
+    void *objectCbArg, 
+    ossl_unused OSSL_PASSPHRASE_CALLBACK *pwCb, 
+    ossl_unused void* pwCbArg);
 
-int KeyIso_edit_alt_names_section(
-    const uuid_t correlationId,
-    CONF *conf,
-    const char *dns1,
-    const char *dns2);
+int KeyIso_prov_set_md_from_mdname(
+    OSSL_LIB_CTX *libCtx, 
+    const OSSL_PARAM *p, 
+    const char* mdName, 
+    const char *propq, 
+    EVP_MD **md, 
+    const OSSL_ITEM **mdInfo);
 
-/** Public key operation APIs **/
+EVP_PKEY *KeyIso_new_pubKey_from_privKey(
+    OSSL_LIB_CTX *libCtx, 
+    EVP_PKEY *pkey);
+
+/** Common KeyMgmt functions **/
+void* KeyIso_keymgmt_load(
+    const void *reference, 
+    size_t reference_sz);
+
+int KeyIso_keymgmt_common_import(
+    KEYISO_PROV_PKEY *pkey, 
+    const char *algName, 
+    int selection, 
+    const OSSL_PARAM params[]);
+
+int KeyIso_keymgmt_common_export(
+    KEYISO_PROV_PKEY *pkey, 
+    int selection, 
+    OSSL_CALLBACK *param_cb, 
+    void *cbarg);
+
+int KeyIso_keymgmt_match(
+    const KEYISO_PROV_PKEY *pkey1, 
+    const KEYISO_PROV_PKEY *pkey2, 
+    int selection);
+
+int KeyIso_keymgmt_has(
+    const KEYISO_PROV_PKEY *pkey, 
+    int selection);
+
+/** Common store functions **/
+int KeyIso_store_load(
+    KEYISO_PROV_STORE_CTX *storeCtx, 
+    OSSL_CALLBACK *objectCb, 
+    void *objectCbArg,
+    ossl_unused OSSL_PASSPHRASE_CALLBACK *pwCb, 
+    ossl_unused void* pwCbArg);
+
+KEYISO_PROV_STORE_CTX* KeyIso_store_new_ctx(
+    const char *uri, 
+    KEYISO_PROV_PROVCTX *provCtx);
+
+int KeyIso_store_close(
+    KEYISO_PROV_STORE_CTX *storeCtx);
+
+/** RSA specific functions **/
+KEYISO_PROV_PKEY* KeyIso_prov_rsa_keymgmt_new(
+    KEYISO_PROV_PROVCTX* provCtx, 
+    unsigned int keyType);
+
+void KeyIso_rsa_keymgmt_free(
+    KEYISO_PROV_PKEY *pkey);
+
+KEYISO_PROV_RSA_CTX* KeyIso_prov_rsa_newctx(
+    KEYISO_PROV_PKEY *provCtx,
+    ossl_unused const char *propq);
+
+void KeyIso_prov_rsa_freectx(
+    KEYISO_PROV_RSA_CTX *ctx);
+
+KEYISO_PROV_RSA_CTX* KeyIso_prov_rsa_dupctx(
+    KEYISO_PROV_RSA_CTX *ctx);
+
 int KeyIso_rsa_cipher_encrypt(
     KEYISO_PROV_RSA_CTX *ctx, 
     unsigned char *out, 
@@ -171,62 +260,24 @@ int KeyIso_rsa_signature_verify(
     size_t sigLen, 
     const unsigned char* tbs, 
     size_t tbsLen);
-
-/** Common RSA Functions **/
-int KeyIso_create_key_object(
-    const uuid_t correlationId,
-    KEYISO_PROV_PROVCTX *provCtx, 
-    KEYISO_KEY_CTX *keyCtx, EVP_PKEY *pubKey, 
-    OSSL_CALLBACK *objectCb, 
-    void *objectCbArg, 
-    ossl_unused OSSL_PASSPHRASE_CALLBACK *pwCb, 
-    ossl_unused void* pwCbArg,
-    bool monitoredByKIU);
-
-int KeyIso_rsa_store_load(
-    KEYISO_PROV_STORE_CTX *storeCtx, 
-    OSSL_CALLBACK *objectCb, 
-    void *objectCbArg,
-    ossl_unused OSSL_PASSPHRASE_CALLBACK *pwCb, 
-    ossl_unused void* pwCbArg);
-
-KEYISO_PROV_STORE_CTX* KeyIso_store_new_ctx(
-    const char *uri, 
+    
+/** ECC specific functions **/
+KEYISO_PROV_PKEY* KeyIso_prov_ecc_keymgmt_new(
     KEYISO_PROV_PROVCTX *provCtx);
 
-int KeyIso_rsa_store_close(
-    KEYISO_PROV_STORE_CTX *storeCtx);
-
-KEYISO_PROV_PKEY* KeyIso_prov_rsa_keymgmt_new(
-    KEYISO_PROV_PROVCTX* provCtx, 
-    unsigned int keyType);
-
-void KeyIso_rsa_keymgmt_free(
+void KeyIso_ecc_keymgmt_free(
     KEYISO_PROV_PKEY *pkey);
 
-/** Common function for both RSA and ECC **/
-int KeyIso_prov_set_md_from_mdname(
-    OSSL_LIB_CTX *libCtx, 
-    const OSSL_PARAM *p, 
-    const char* mdName, 
-    const char *propq, 
-    EVP_MD **md, 
-    const OSSL_ITEM **mdInfo);
+size_t KeyIso_get_ec_pkey_size(
+    int curveNid);
 
-EVP_PKEY *KeyIso_new_pubKey_from_privKey(
-    OSSL_LIB_CTX *libCtx, 
-    EVP_PKEY *pkey);
-
-/** Common RSA functions for both Signature and Asym cipher APIs **/
-KEYISO_PROV_RSA_CTX* KeyIso_prov_rsa_newctx(
-    KEYISO_PROV_PKEY *provCtx,
-    ossl_unused const char *propq);
-
-void KeyIso_prov_rsa_freectx(
-    KEYISO_PROV_RSA_CTX *ctx);
-
-KEYISO_PROV_RSA_CTX* KeyIso_prov_rsa_dupctx(
-    KEYISO_PROV_RSA_CTX *ctx);
+int KeyIso_ecdsa_signature_verify(
+    KEYISO_PROV_ECDSA_CTX *ctx,
+    int curveNid,
+    const unsigned char *sig,
+    size_t sigLen,
+    const unsigned char *tbs,
+    size_t tbsLen);
 
 /** Common utility functions **/
 PemType KeyIso_get_type_from_bio_buff(
@@ -241,6 +292,17 @@ long KeyIso_read_content_between_headers(
     const char *headerBegin, 
     const char *headerEnd, 
     unsigned char **data);
+
+int KeyIso_conf_get(
+    CONF **conf,
+    const char *dns1,
+    const char *dns2);
+
+int KeyIso_edit_alt_names_section(
+    const uuid_t correlationId,
+    CONF *conf,
+    const char *dns1,
+    const char *dns2);
 
 #ifdef  __cplusplus
 }

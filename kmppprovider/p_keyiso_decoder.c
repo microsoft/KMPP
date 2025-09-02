@@ -31,7 +31,7 @@ struct KeyIso_prov_decoder_ctx_st {
 };
 
 // Checks if the given bytes represent a keyid
-// The keyid format is expected to be "n<base64_extra_data>:<encrypted_pfx>" or "0.<base64_salt>:<encrypted_pfx>"
+// The keyid format is expected to be "n<base64_client_data>:<encrypted_pfx>" or "0.<base64_salt>:<encrypted_pfx>"
 static int _is_keyid(unsigned char *inBytes, unsigned int inLength) 
 {
     if (inBytes == NULL || inLength == 0) {
@@ -46,7 +46,7 @@ static int _is_keyid(unsigned char *inBytes, unsigned int inLength)
     // Note: The decoder supports decoding keyids that were encoded using the kmpp encoder,
     // which is why we check only for 'n' as the first character, and not support the legacy '0' format.
     if (inBytes[0] == VERSION_CHAR) {
-        maxLimit = MAX_EXTRA_DATA_BASE64_LENGTH + 1;
+        maxLimit = MAX_CLIENT_DATA_BASE64_LENGTH + 1;
     } else {
         // Invalid version
         KMPPerr(KeyIsoErrReason_InvalidKeyId);
@@ -57,7 +57,7 @@ static int _is_keyid(unsigned char *inBytes, unsigned int inLength)
     maxLengthToSearch = (maxLimit > inLength) ? inLength : maxLimit;
 
     // Check if ':' is present in the buffer
-    if (memchr(inBytes, EXTRA_DATA_DELIMITER, maxLengthToSearch) == NULL) {
+    if (memchr(inBytes, CLIENT_DATA_DELIMITER, maxLengthToSearch) == NULL) {
         KMPPerr(KeyIsoErrReason_UnsupportedFormat);
         return STATUS_FAILED;
     }
@@ -94,18 +94,18 @@ static int _load_keyid(unsigned char *inBytes, unsigned int inLength, KEYISO_PRO
         return STATUS_FAILED;
     }
 
-    int ret = KeyIso_rsa_store_load(storeCtx, objectCb, objectCbArg, pwCb, pwCbArg);
+    int ret = KeyIso_store_load(storeCtx, objectCb, objectCbArg, pwCb, pwCbArg);
     if (ret != STATUS_OK) {
         KMPPerr(KeyIsoErrReason_OperationFailed);
     }
 
     // Clean up the store context
-    KeyIso_rsa_store_close(storeCtx);
+    KeyIso_store_close(storeCtx);
 
     return ret;
 }
 
-static int _cleanup_import_decoded_key(int ret, KeyIsoErrReason reason, char *salt, unsigned char *pfxBytes, KEYISO_KEY_CTX *keyCtx)
+static int _cleanup_import_decoded_key(int ret, KeyIsoErrReason reason, char *clientData, unsigned char *pfxBytes, KEYISO_KEY_CTX *keyCtx)
 {
     if (ret != STATUS_OK) {
         KMPPerr(reason);
@@ -114,8 +114,8 @@ static int _cleanup_import_decoded_key(int ret, KeyIsoErrReason reason, char *sa
         }
     }
 
-    if (salt) {
-        KeyIso_clear_free_string(salt);
+    if (clientData) {
+        KeyIso_clear_free_string(clientData);
     }
 
     if (pfxBytes) {
@@ -134,7 +134,7 @@ static int _import_decoded_private_key(EVP_PKEY *pkey, OSSL_LIB_CTX *libCtx, KEY
 
     uuid_t correlationId = {0};
     int pfxLength = 0;
-    char *salt = NULL;
+    char *clientData = NULL;
     unsigned char *pfxBytes = NULL;
     X509_SIG *encryptedPkey = NULL;
     KEYISO_KEY_CTX *keyCtx = NULL;
@@ -147,8 +147,8 @@ static int _import_decoded_private_key(EVP_PKEY *pkey, OSSL_LIB_CTX *libCtx, KEY
 
     // Import the private key and create the X509_SIG (encrypted private key)
     KeyIso_rand_bytes(correlationId, sizeof(correlationId));
-    if (KeyIso_CLIENT_import_private_key(correlationId, 0, pkey, &encryptedPkey, &salt) != STATUS_OK) {
-        return _cleanup_import_decoded_key(STATUS_FAILED, KeyIsoErrReason_FailedToImport, salt, pfxBytes, keyCtx);
+    if (KeyIso_CLIENT_import_private_key(correlationId, 0, pkey, &encryptedPkey, &clientData) != STATUS_OK) {
+        return _cleanup_import_decoded_key(STATUS_FAILED, KeyIsoErrReason_FailedToImport, clientData, pfxBytes, keyCtx);
     }
 
     // Create a new PFX structure
@@ -156,28 +156,28 @@ static int _import_decoded_private_key(EVP_PKEY *pkey, OSSL_LIB_CTX *libCtx, KEY
         if (encryptedPkey) {
             X509_SIG_free(encryptedPkey);
         }
-        return _cleanup_import_decoded_key(STATUS_FAILED, KeyIsoErrReason_FailedToCreatePfx, salt, pfxBytes, keyCtx);
+        return _cleanup_import_decoded_key(STATUS_FAILED, KeyIsoErrReason_FailedToCreatePfx, clientData, pfxBytes, keyCtx);
     }
 
     // Create a new key context from the PFX bytes
-    if (KeyIso_CLIENT_private_key_open_from_pfx(correlationId, pfxLength, pfxBytes, salt, &keyCtx) != STATUS_OK) {
-        return _cleanup_import_decoded_key(STATUS_FAILED, KeyIsoErrReason_FailedToGetKeyCtx, salt, pfxBytes, keyCtx);
+    if (KeyIso_CLIENT_private_key_open_from_pfx(correlationId, pfxLength, pfxBytes, clientData, &keyCtx) != STATUS_OK) {
+        return _cleanup_import_decoded_key(STATUS_FAILED, KeyIsoErrReason_FailedToGetKeyCtx, clientData, pfxBytes, keyCtx);
     }
 
     // Create a new public key from the private key
     pubKey = KeyIso_new_pubKey_from_privKey(libCtx, pkey);
     if (pubKey == NULL) {
-        return _cleanup_import_decoded_key(STATUS_FAILED, KeyIsoErrReason_FailedToGetPubKey, salt, pfxBytes, keyCtx);
+        return _cleanup_import_decoded_key(STATUS_FAILED, KeyIsoErrReason_FailedToGetPubKey, clientData, pfxBytes, keyCtx);
     }
 
     // Create a new key object
     KeyIsoErrReason reason = KeyIsoErrReason_NoError;
-    int ret = KeyIso_create_key_object(correlationId, ctx->provCtx, keyCtx, pubKey, objectCb, objectCbArg, pwCb, pwCbArg, false); // encoder self-generated cert should not be monitored as KIU
+    int ret = KeyIso_create_key_object(ctx->provCtx, keyCtx, pubKey, objectCb, objectCbArg, pwCb, pwCbArg);
     if (ret != STATUS_OK) {
         reason = KeyIsoErrReason_OperationFailed;
     }
 
-    return _cleanup_import_decoded_key(ret, reason, salt, pfxBytes, keyCtx);
+    return _cleanup_import_decoded_key(ret, reason, clientData, pfxBytes, keyCtx);
 }
 
 static int _cleanup_decode_private_key(int ret, KeyIsoErrReason reason, EVP_PKEY *pkey, OSSL_DECODER_CTX *dctx, OSSL_PROVIDER *osslProv, OSSL_LIB_CTX *libCtx)
@@ -355,7 +355,7 @@ static int _decoder_decode(KEYISO_PROV_DECODER_CTX *ctx, OSSL_CORE_BIO *cin, int
     }
 
     if (_decode_pem_from_core_bio(cin, ctx, objectCb, objectCbArg, pwCb, pwCbArg) != STATUS_OK) {
-        ERR_KMPP_error(KeyIsoErrReason_FailedToDecodePem);
+        KMPPerr(KeyIsoErrReason_FailedToDecodePem);
         return STATUS_FAILED;
     }
 

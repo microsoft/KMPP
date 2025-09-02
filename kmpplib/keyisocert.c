@@ -915,7 +915,7 @@ end:
     }
 
     if (ret > 0) {
-        KEYISOP_trace_log_para(correlationId, 0, title, "Complete",
+        KEYISOP_trace_log_para(correlationId, KEYISOP_TRACELOG_VERBOSE_FLAG, title, "Complete",
             "updatedCount: %d", successCount);
     } else {
         KEYISOP_trace_log_error_para(correlationId, 0, title, "Complete", ret < 0 ? "Partial updates" : "No updates",
@@ -1018,10 +1018,9 @@ end:
 
     if (ret && failedCount) {
         ret = -1;
-    }
-
+    }    
     if (ret > 0) {
-        KEYISOP_trace_log_para(correlationId, 0, title, "Complete",
+        KEYISOP_trace_log_para(correlationId, KEYISOP_TRACELOG_VERBOSE_FLAG, title, "Complete",
             "updatedCount: %d", successCount);
     } else {
         KEYISOP_trace_log_error_para(correlationId, 0, title, "Complete", ret < 0 ? "Partial updates" : "No updates",
@@ -1303,8 +1302,7 @@ int KeyIsoP_install_image_certs(
         installedFilename);
     if (installedPath == NULL) {
         goto end;
-    }
-
+    }    
     if (_read_is_installed_file(correlationId, installedPath)) {
         KEYISOP_trace_log_para(correlationId, 0, title, "Certificates already installed",
             "installed: %s", installedPath);
@@ -1358,8 +1356,7 @@ int KeyIsoP_install_image_certs(
 
     if (!_write_is_installed_file(correlationId, installedPath)) {
         goto end;
-    }
-
+    }    
     KEYISOP_trace_log_para(correlationId, 0, title, "Certificates successfully installed",
          "certs: %s installed: %s", certsPath, installedPath);
 
@@ -1400,7 +1397,7 @@ int KeyIsoP_install_service_version(
     if (installedVersion != KEYISOP_CURRENT_VERSION) {
         if (!_write_version_file(correlationId, installedPath)) {
             goto end;
-        }
+        }        
         installedVersion = KEYISOP_CURRENT_VERSION;
         KEYISOP_trace_log_para(correlationId, 0, title, "Version file has been successfully installed",
             "version: %u installedPath: %s", installedVersion, installedPath);
@@ -1882,6 +1879,11 @@ int KeyIsoP_load_pfx_certs(
     STACK_OF(PKCS7) *asafes = NULL;
     int i;
 
+    if (!cert) {
+        KEYISOP_trace_log(correlationId, 0, title, "Invalid output certificate parameter");
+        goto end;
+    }
+
     *cert = NULL;
 
     ERR_clear_error();
@@ -2114,6 +2116,8 @@ int KeyIsoP_X509_verify_cert(
     STACK_OF(X509) *storeChain = NULL;
     int chainDepth = 0;
     int hasTrustedCa = 0;
+    BIO *rootBio = NULL;  
+    BIO *caBio = NULL;    
     *verifyChainError = 0;
 
     ERR_clear_error();
@@ -2161,7 +2165,6 @@ int KeyIsoP_X509_verify_cert(
         }
     }
 
-
     for (int i = 0; i < chainDepth; i++) {
         X509 *cert = sk_X509_value(storeChain, i);
 
@@ -2182,7 +2185,7 @@ int KeyIsoP_X509_verify_cert(
                     break;
                 }
             }
-			
+            
             *verifyChainError = X509_V_ERR_CERT_REVOKED;
             X509_STORE_CTX_set_error(storeCtx, *verifyChainError);
             KEYISOP_trace_log_openssl_verify_cert_error(ctx->correlationId, 0, title,
@@ -2197,9 +2200,6 @@ int KeyIsoP_X509_verify_cert(
         if (KeyIsoP_is_untrusted_root(root)) {
             X509 *ca = sk_X509_value(storeChain, chainDepth - 2);
             const char nullTerminator = 0;
-
-            BIO *rootBio = NULL;
-            BIO *caBio = NULL;
             const char *rootName = "";
             const char *caName = "";
 
@@ -2245,10 +2245,6 @@ int KeyIsoP_X509_verify_cert(
                     "KeyIsoP_is_trusted_ca", 
                     "ROOT: <%s> CA: <%s>", rootName, caName);
             }
-
-
-            BIO_free(rootBio);
-            BIO_free(caBio);
         }
     }
 
@@ -2276,6 +2272,15 @@ int KeyIsoP_X509_verify_cert(
     ERR_clear_error();
 end: 
     sk_X509_pop_free(storeChain, X509_free);
+    // Ensure BIO objects are always freed
+    if (rootBio != NULL) {
+        BIO_free(rootBio);
+        rootBio = NULL;
+    }
+    if (caBio != NULL) {
+        BIO_free(caBio);
+        caBio = NULL;
+    }
     return ret;
 
 openSslErr:

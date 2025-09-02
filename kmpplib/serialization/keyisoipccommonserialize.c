@@ -15,11 +15,12 @@
 */
 
 //Header tags
-#define CBOR_PARAM_HEADER           "header"
-#define CBOR_PARAM_VERSION          "version"
-#define CBOR_PARAM_COMMAND          "command"
-#define CBOR_PARAM_CORRELATION_ID   "corrId"
-#define CBOR_PARAM_RESULT           "result"
+#define CBOR_PARAM_HEADER             "header"
+#define CBOR_PARAM_VERSION            "version"
+#define CBOR_PARAM_COMMAND            "command"
+#define CBOR_PARAM_CORRELATION_ID     "corrId"
+#define CBOR_PARAM_RESULT             "result"
+#define CBOR_PARAM_ISOLATION_SOLUTION "isolationSolution"
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
 /*
@@ -70,14 +71,13 @@ SerializeStatus encode_header_in_st(CborEncoder *mapEncoder, KEYISO_INPUT_HEADER
     return SerializeStatus_Success;  
 }
 
-
-SerializeStatus encode_header_out_st(CborEncoder *mapEncoder, KEYISO_OUTPUT_HEADER_ST *headerSt)
+SerializeStatus encode_header_out_st_legacy(CborEncoder *mapEncoder, KEYISO_OUTPUT_LEGACY_HEADER_ST *headerSt)
 {
     CborError cborErr = CborNoError;
     CborEncoder headerMapEncoder = { 0 };
 
     CBOR_OPERATION(cbor_encode_text_stringz(mapEncoder, CBOR_PARAM_HEADER))
-    CBOR_OPERATION(cbor_encoder_create_map(mapEncoder, &headerMapEncoder, NUM_OF_HEADER_OUT_ELEMENTS))
+    CBOR_OPERATION(cbor_encoder_create_map(mapEncoder, &headerMapEncoder, NUM_OF_LEGACY_HEADER_OUT_ELEMENTS))
 
     // Encode command  
     CBOR_OPERATION(cbor_encode_text_stringz(&headerMapEncoder, CBOR_PARAM_COMMAND))
@@ -90,6 +90,54 @@ SerializeStatus encode_header_out_st(CborEncoder *mapEncoder, KEYISO_OUTPUT_HEAD
     CBOR_OPERATION(cbor_encoder_close_container(mapEncoder, &headerMapEncoder))
     return SerializeStatus_Success;  
 } 
+
+SerializeStatus encode_header_out_st(CborEncoder *mapEncoder, KEYISO_OUTPUT_HEADER_ST *headerSt)
+{
+    CborError cborErr = CborNoError;
+    CborEncoder headerMapEncoder = { 0 };
+
+    CBOR_OPERATION(cbor_encode_text_stringz(mapEncoder, CBOR_PARAM_HEADER))
+    CBOR_OPERATION(cbor_encoder_create_map(mapEncoder, &headerMapEncoder, NUM_OF_HEADER_OUT_ELEMENTS))
+
+    // Encode version
+    CBOR_OPERATION(cbor_encode_text_stringz(&headerMapEncoder, CBOR_PARAM_VERSION))
+    CBOR_OPERATION(cbor_encode_simple_value(&headerMapEncoder, headerSt->version))
+
+    // Encode isolationSolution
+    CBOR_OPERATION(cbor_encode_text_stringz(&headerMapEncoder, CBOR_PARAM_ISOLATION_SOLUTION))
+    CBOR_OPERATION(cbor_encode_uint(&headerMapEncoder, (uint64_t)headerSt->isolationSolution))
+
+    // Encode command  
+    CBOR_OPERATION(cbor_encode_text_stringz(&headerMapEncoder, CBOR_PARAM_COMMAND))
+    CBOR_OPERATION(cbor_encode_uint(&headerMapEncoder, (uint64_t)headerSt->command))
+
+    // Encode result  
+    CBOR_OPERATION(cbor_encode_text_stringz(&headerMapEncoder, CBOR_PARAM_RESULT))
+    CBOR_OPERATION(cbor_encode_uint(&headerMapEncoder, (uint64_t)headerSt->result))
+
+    CBOR_OPERATION(cbor_encoder_close_container(mapEncoder, &headerMapEncoder))
+    return SerializeStatus_Success;  
+} 
+
+SerializeStatus encode_client_metadata_header_in_st(CborEncoder *mapEncoder, KEYISO_CLIENT_METADATA_HEADER_ST *headerSt)
+{
+    CborError cborErr = CborNoError;
+    CborEncoder headerMapEncoder = { 0 };
+
+    CBOR_OPERATION(cbor_encode_text_stringz(mapEncoder, CBOR_PARAM_HEADER))
+    CBOR_OPERATION(cbor_encoder_create_map(mapEncoder, &headerMapEncoder, NUM_OF_CLIENT_METADATA_HEADER_IN_ELEMENTS))
+
+    // Encode version  
+    CBOR_OPERATION(cbor_encode_text_stringz(&headerMapEncoder, CBOR_PARAM_VERSION))
+    CBOR_OPERATION(cbor_encode_simple_value(&headerMapEncoder, headerSt->version))
+    
+    // Encode isolationSolution  
+    CBOR_OPERATION(cbor_encode_text_stringz(&headerMapEncoder, CBOR_PARAM_ISOLATION_SOLUTION))
+    CBOR_OPERATION(cbor_encode_uint(&headerMapEncoder, (uint64_t)headerSt->isolationSolution))
+
+    CBOR_OPERATION(cbor_encoder_close_container(mapEncoder, &headerMapEncoder))
+    return SerializeStatus_Success;  
+}
 
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
@@ -126,6 +174,21 @@ SerializeStatus get_uint32_val(CborValue *map, uint32_t *value)
     return SerializeStatus_Success;  
 }
 
+SerializeStatus get_uint_16_val(CborValue *map, uint16_t *value)
+{
+    CborError cborErr = CborNoError;
+    uint64_t uintValue;
+
+    CBOR_OPERATION(cbor_value_get_uint64(map, &uintValue))
+    CBOR_OPERATION(cbor_value_advance_fixed(map))
+    if (uintValue > UINT16_MAX) {
+        KEYISOP_trace_log_error_para(NULL, 0, KEYISOP_ENGINE_TITLE, "Value exceeds UINT16_MAX", "Decode error", "uintValue = %" PRIu64, uintValue);
+        return SerializeStatus_InvalidIntValue;
+    }
+    *value = (uint16_t)uintValue;
+    return SerializeStatus_Success;  
+}
+
 
 SerializeStatus validate_tag(CborValue *map, const char *tag)
 {
@@ -157,16 +220,22 @@ SerializeStatus decode_string_ptr(CborValue *map, const char *lenTag, int32_t *d
     return SerializeStatus_Success;
 }
 
-SerializeStatus decode_string_ptr_by_len(CborValue *map, int32_t decodedLen, const char *bytesTag, uint8_t *decodedBytes) 
+SerializeStatus decode_string_ptr_by_len(CborValue *map, uint32_t decodedLen, const char *bytesTag, uint8_t *decodedBytes) 
 {
     CborError cborErr = CborNoError;
 
     // Decode bytes  
     CBOR_CHECK_STATUS(validate_tag(map, bytesTag))
-    size_t size;
+    size_t size = 0;
     CBOR_OPERATION(cbor_value_get_string_length(map, &size))
-    if ((decodedLen > UINT32_MAX) || (size != (uint32_t)decodedLen)) {
-        KEYISOP_trace_log_error_para(NULL, 0, KEYISOP_ENGINE_TITLE, "Invalid string len", "Decode error", "len(decodedBytes) = %ld, decodedLen = %d", size, decodedLen);        
+    if (size > UINT32_MAX) {
+        KEYISOP_trace_log_error_para(NULL, 0, KEYISOP_ENGINE_TITLE, "Invalid string len", "Decode error", "len(decodedBytes) = %lu", size);        
+        return SerializeStatus_InvalidLen;
+    }
+   
+    // Ensure the actual data is at least as large as expected
+    if ((uint32_t)size != decodedLen) {
+        KEYISOP_trace_log_error_para(NULL, 0, KEYISOP_ENGINE_TITLE, "Invalid string len", "Decode error", "len(decodedBytes) = %lu, decodedLen = %u", size, decodedLen);        
         return SerializeStatus_InvalidLen;
     } 
     // The iterator is promoted in the copying function if the last parameter is given as an iterator
@@ -239,7 +308,7 @@ SerializeStatus decode_header_in_st(CborValue *map, KEYISO_INPUT_HEADER_ST *head
     CBOR_CHECK_STATUS(get_uint32_val(&headerMap, &headerSt->command))
   
     if (headerSt->command != expectedCommand) {
-        KEYISOP_trace_log_error_para(NULL, 0, KEYISOP_ENGINE_TITLE, "unexpected command", "Decode error", "eaderSt->command = %d, expectedCommand = %d", headerSt->command, expectedCommand);        
+        KEYISOP_trace_log_error_para(NULL, 0, KEYISOP_ENGINE_TITLE, "unexpected command", "Decode error", "headerSt->command = %d, expectedCommand = %d", headerSt->command, expectedCommand);        
         return SerializeStatus_InvalidCommand;
     }
 
@@ -253,6 +322,29 @@ SerializeStatus decode_header_in_st(CborValue *map, KEYISO_INPUT_HEADER_ST *head
     return SerializeStatus_Success;  
 }
 
+SerializeStatus decode_client_metadata_header_in_st(CborValue *map, KEYISO_CLIENT_METADATA_HEADER_ST *headerSt)
+{
+    CborError cborErr = CborNoError;
+    CborValue headerMap = { 0 };
+
+    CBOR_CHECK_STATUS(validate_tag(map, CBOR_PARAM_HEADER))
+    // Enter the header map
+    CBOR_OPERATION(cbor_value_enter_container(map, &headerMap))
+
+    // Decode version  
+    CBOR_CHECK_STATUS(validate_tag(&headerMap, CBOR_PARAM_VERSION))
+    CBOR_OPERATION(cbor_value_get_simple_type(&headerMap, &(headerSt->version)))          
+    CBOR_OPERATION(cbor_value_advance_fixed(&headerMap))
+
+    // Decode isolationSolution
+    uint16_t isolationSolution_local = 0;
+    CBOR_CHECK_STATUS(validate_tag(&headerMap, CBOR_PARAM_ISOLATION_SOLUTION))
+    CBOR_CHECK_STATUS(get_uint_16_val(&headerMap, &isolationSolution_local))
+    headerSt->isolationSolution = isolationSolution_local;
+
+    CBOR_OPERATION(cbor_value_leave_container(map, &headerMap)) //Updates map to point to the next element after the container.  
+    return SerializeStatus_Success;  
+}
 
 SerializeStatus decode_header_out_st(CborValue *map, KEYISO_OUTPUT_HEADER_ST *headerSt, IpcCommand expectedCommand)
 {
@@ -262,13 +354,22 @@ SerializeStatus decode_header_out_st(CborValue *map, KEYISO_OUTPUT_HEADER_ST *he
     CBOR_CHECK_STATUS(validate_tag(map, CBOR_PARAM_HEADER))
     // Enter the header map
     CBOR_OPERATION(cbor_value_enter_container(map, &headerMap))
-    
+
+    // Decode version
+    CBOR_CHECK_STATUS(validate_tag(&headerMap, CBOR_PARAM_VERSION))
+    CBOR_OPERATION(cbor_value_get_simple_type(&headerMap, &(headerSt->version)))          
+    CBOR_OPERATION(cbor_value_advance_fixed(&headerMap))
+
+    // Decode isolationSolution
+    CBOR_CHECK_STATUS(validate_tag(&headerMap, CBOR_PARAM_ISOLATION_SOLUTION))
+    CBOR_CHECK_STATUS(get_uint_16_val(&headerMap, &headerSt->isolationSolution))
+
     // Decode command        
     CBOR_CHECK_STATUS(validate_tag(&headerMap, CBOR_PARAM_COMMAND))
     CBOR_CHECK_STATUS(get_uint32_val(&headerMap, &headerSt->command))   
 
     if (headerSt->command != expectedCommand) {
-        KEYISOP_trace_log_error_para(NULL, 0, KEYISOP_ENGINE_TITLE, "unexpected command", "Decode error", "eaderSt->command = %d, expectedCommand = %d", headerSt->command, expectedCommand);        
+        KEYISOP_trace_log_error_para(NULL, 0, KEYISOP_ENGINE_TITLE, "unexpected command", "Decode error", "headerSt->command = %d, expectedCommand = %d", headerSt->command, expectedCommand);        
         return SerializeStatus_InvalidCommand;
     }
 
@@ -278,4 +379,131 @@ SerializeStatus decode_header_out_st(CborValue *map, KEYISO_OUTPUT_HEADER_ST *he
     
     CBOR_OPERATION(cbor_value_leave_container(map, &headerMap)) //Updates map to point to the next element after the container.  
     return SerializeStatus_Success;  
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////////
+/*
+    Legacy header support functions
+*/
+
+
+static SerializeStatus _is_legacy_header_format(CborValue *map, bool *isLegacyFormat)
+{
+    if (map == NULL || isLegacyFormat == NULL) {
+        KEYISOP_trace_log_error(NULL, 0, KEYISOP_ENGINE_TITLE, "Invalid parameter", "map or isLegacyFormat is NULL");
+        return SerializeStatus_InvalidParams;
+    }
+
+    CborError cborErr = CborNoError;
+    CborValue headerMap = { 0 };
+    *isLegacyFormat = false;
+    SerializeStatus status = SerializeStatus_Success;
+    
+    // Save the current position to restore on any error or completion
+    CborValue savedMap = *map;
+
+    // Validate header tag
+    status = validate_tag(map, CBOR_PARAM_HEADER);
+    if (status != SerializeStatus_Success) {
+        KEYISOP_trace_log_error(NULL, 0, KEYISOP_ENGINE_TITLE, "Failed to validate header tag", "Expected 'header' tag not found");
+        *map = savedMap;
+        return status;
+    }
+
+    // Enter the header map
+    cborErr = cbor_value_enter_container(map, &headerMap);
+    if (cborErr != CborNoError) {
+        KEYISOP_trace_log_error(NULL, 0, KEYISOP_ENGINE_TITLE, "Failed to enter header map", "Could not parse header map");
+        *map = savedMap;
+        return SerializeStatus_InvalidFormat;
+    }
+
+    if (!cbor_value_is_text_string(&headerMap)) {
+        KEYISOP_trace_log_error(NULL, 0, KEYISOP_ENGINE_TITLE, "Failed to validate header tag", "string is expected");
+        *map = savedMap;
+        return SerializeStatus_InvalidFormat;
+    }    
+    bool isVersion = false;
+    cborErr = cbor_value_text_string_equals(&headerMap, CBOR_PARAM_VERSION, &isVersion);
+    if (cborErr != CborNoError) {
+        KEYISOP_trace_log_error(NULL, 0, KEYISOP_ENGINE_TITLE, "Failed to validate version tag", "CBOR parsing error");
+        *map = savedMap;
+        return SerializeStatus_InvalidFormat;
+    }
+    if (isVersion) {
+        // Version tag found - this is the new format
+        *isLegacyFormat = false;
+        KEYISOP_trace_log(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_ENGINE_TITLE, "New header format detected: version tag found");
+    } else {
+        // No version tag found - this is the legacy format
+        *isLegacyFormat = true;
+        KEYISOP_trace_log(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_ENGINE_TITLE, "Legacy header format detected: no version tag found");
+    }
+
+    // Always restore the original position
+    *map = savedMap;
+    return SerializeStatus_Success;
+}
+
+static SerializeStatus decode_legacy_header_out_st(CborValue *map, KEYISO_OUTPUT_LEGACY_HEADER_ST *legacyHeader, IpcCommand expectedCommand)
+{
+    CborError cborErr = CborNoError;
+    CborValue headerMap = { 0 };
+
+    CBOR_CHECK_STATUS(validate_tag(map, CBOR_PARAM_HEADER))
+    // Enter the header map
+    CBOR_OPERATION(cbor_value_enter_container(map, &headerMap))
+
+    // Decode command (first element in legacy format)
+    CBOR_CHECK_STATUS(validate_tag(&headerMap, CBOR_PARAM_COMMAND))
+    CBOR_CHECK_STATUS(get_uint32_val(&headerMap, &legacyHeader->command))
+
+    if (legacyHeader->command != expectedCommand) {
+        KEYISOP_trace_log_error_para(NULL, 0, KEYISOP_ENGINE_TITLE, "unexpected command in legacy header", "Decode error", "legacyHeader->command = %d, expectedCommand = %d", legacyHeader->command, expectedCommand);
+        return SerializeStatus_InvalidCommand;
+    }
+
+    // Decode result
+    CBOR_CHECK_STATUS(validate_tag(&headerMap, CBOR_PARAM_RESULT))
+    CBOR_CHECK_STATUS(get_uint32_val(&headerMap, &legacyHeader->result))
+
+    CBOR_OPERATION(cbor_value_leave_container(map, &headerMap)) //Updates map to point to the next element after the container.
+    return SerializeStatus_Success;
+}
+
+static void convert_legacy_to_current_header(const KEYISO_OUTPUT_LEGACY_HEADER_ST *legacyHeader, KEYISO_OUTPUT_HEADER_ST *currentHeader)
+{
+    currentHeader->version = KEYISOP_INVALID_VERSION;
+    currentHeader->isolationSolution = KeyIsoSolutionType_invalid;
+    
+    // Copy command and result from legacy header
+    currentHeader->command = legacyHeader->command;
+    currentHeader->result = legacyHeader->result;
+}
+
+SerializeStatus decode_header_out_st_with_legacy_support(CborValue *map, KEYISO_OUTPUT_HEADER_ST *headerSt, IpcCommand expectedCommand)
+{
+    bool isLegacyFormat = false;
+    SerializeStatus res = _is_legacy_header_format(map, &isLegacyFormat);
+    if (res != SerializeStatus_Success) {
+        KEYISOP_trace_log_error(NULL, 0, KEYISOP_ENGINE_TITLE, "Failed to determine header format", "CBOR parsing error");
+        return res;
+    }
+    // Check if this is a legacy header format
+    if (isLegacyFormat) {
+        KEYISOP_trace_log(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_ENGINE_TITLE, "Legacy header format detected");
+        KEYISO_OUTPUT_LEGACY_HEADER_ST legacyHeader = { 0 };
+        
+        // Decode as legacy header
+        CBOR_CHECK_STATUS(decode_legacy_header_out_st(map, &legacyHeader, expectedCommand));
+        
+        // Convert to current header format
+        convert_legacy_to_current_header(&legacyHeader, headerSt);
+        
+        return SerializeStatus_Success;
+    } else {
+        // Use standard current format decoder
+        KEYISOP_trace_log(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_ENGINE_TITLE, "New header format detected");
+        return decode_header_out_st(map, headerSt, expectedCommand);
+    }
 }

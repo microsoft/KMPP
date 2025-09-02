@@ -210,7 +210,7 @@ static int _gdbus_pfx_update_locked(
             g_variant_ref(correlationIdVariant),
             KEYISOP_VERSION_1,
             g_variant_ref(pfxBytesVariant),
-            keyDetails->salt,
+            keyDetails->clientData,
             &keyId,
             NULL,                   // cancellable
             &error) || error || keyId == 0) {
@@ -319,7 +319,14 @@ int KMPP_GDBUS_CLIENT_pfx_open(
     const unsigned char *pfxBytes,
     const char *salt)
 {
-    size_t saltLength = strlen(salt) + 1;
+    // Legacy code, MScrypt key
+    size_t saltLength = strnlen(salt, KEYISO_SECRET_SALT_STR_BASE64_LEGACY_LEN); 
+    if (saltLength == 0 || saltLength >= KEYISO_SECRET_SALT_STR_BASE64_LEGACY_LEN) {
+        KEYISOP_trace_log_error(keyCtx->correlationId, 0, KEYISOP_GDBUS_CLIENT_TITLE, "salt", "Invalid argument");
+        return 0;
+    }
+    saltLength+= 1; // +1 for NULL termination
+
     size_t dynamicLen = saltLength + pfxLength;
     KEYISO_KEY_DETAILS *keyDetails = (KEYISO_KEY_DETAILS *) KeyIso_zalloc(sizeof(KEYISO_KEY_DETAILS) + dynamicLen);
     if (keyDetails == NULL) 
@@ -332,8 +339,8 @@ int KMPP_GDBUS_CLIENT_pfx_open(
     keyDetails->keyLength = pfxLength;
     keyDetails->keyBytes = (unsigned char *) &keyDetails[1];
     memcpy(keyDetails->keyBytes, pfxBytes, pfxLength);
-    keyDetails->salt = (char *) (keyDetails->keyBytes + pfxLength);
-    memcpy(keyDetails->salt, salt, saltLength);
+    keyDetails->clientData = (char *) (keyDetails->keyBytes + pfxLength); // BC(Salt)
+    memcpy(keyDetails->clientData, salt, saltLength);
     return 1;    
 }
 
@@ -388,8 +395,8 @@ end:
         KeyIso_cleanse(keyDetails->keyBytes, keyDetails->keyLength);
     }
 
-    if (keyDetails->salt != NULL) {
-        KeyIso_cleanse(keyDetails->salt, strlen(keyDetails->salt));
+    if (keyDetails->clientData != NULL) {
+        KeyIso_cleanse(keyDetails->clientData, strlen(keyDetails->clientData));
     }
 
     KeyIso_destroy_gdbus_session(session);
@@ -986,10 +993,13 @@ static int _dbus_kmpp_call_get_version_sync(
     dbus_error_init(&dbus_error);
 
     do {
+        // Resetting result and connection for each retry
+        result = STATUS_OK;
+
         // Connecting to the system bus
         connection = dbus_bus_get(DBUS_BUS_SYSTEM, &dbus_error);
         if (dbus_error_is_set(&dbus_error)) {
-            KEYISOP_trace_log_error_para(correlationId, 0, title, "dbus_bus_get", "returned an error", "Connection Error (%s)", dbus_error.message);
+            KEYISOP_trace_log_error_para(correlationId, KEYISOP_TRACELOG_WARNING_FLAG, title, "dbus_bus_get", "returned an error", "Connection Error (%s)", dbus_error.message);
             dbus_error_free(&dbus_error);
             result = STATUS_FAILED;
             retryCount++;
@@ -998,7 +1008,7 @@ static int _dbus_kmpp_call_get_version_sync(
         }
 
         if (connection == NULL) {
-            KEYISOP_trace_log_error(correlationId, 0, title, "Failed to open connection", "Connection Null");
+            KEYISOP_trace_log_error(correlationId, KEYISOP_TRACELOG_WARNING_FLAG, title, "Failed to open connection", "Connection Null");
             result = STATUS_FAILED;
             retryCount++;
             usleep((unsigned long)(SLEEP_BETWEEN_RETRIES_MILLI * 1000));
@@ -1007,7 +1017,7 @@ static int _dbus_kmpp_call_get_version_sync(
 
         message = dbus_message_new_method_call(bus_name, object_path, interface_name, "GetVersion");
         if (message == NULL) {
-            KEYISOP_trace_log_error(correlationId, 0, title, "Message Null", "constructs a new message to invoke a method on a remote object");
+            KEYISOP_trace_log_error(correlationId, KEYISOP_TRACELOG_WARNING_FLAG, title, "Message Null", "constructs a new message to invoke a method on a remote object");
             dbus_connection_unref(connection);
             result = STATUS_FAILED;
             retryCount++;
@@ -1017,7 +1027,7 @@ static int _dbus_kmpp_call_get_version_sync(
         // Sending the message and get a handle for a reply
         reply = dbus_connection_send_with_reply_and_block(connection, message, (SLEEP_BETWEEN_RETRIES_MILLI * 1000) , &dbus_error);
         if (dbus_error_is_set(&dbus_error)) {
-            KEYISOP_trace_log_error_para(correlationId, 0, title, "send_with_reply_and_block error", "GetVersion method call failed", "Message (%s)", dbus_error.message);
+            KEYISOP_trace_log_error_para(correlationId, KEYISOP_TRACELOG_WARNING_FLAG, title, "send_with_reply_and_block error", "GetVersion method call failed", "Message (%s)", dbus_error.message);
             dbus_error_free(&dbus_error);
             dbus_message_unref(message);
             dbus_connection_unref(connection);
@@ -1028,7 +1038,7 @@ static int _dbus_kmpp_call_get_version_sync(
         }
 
         if (reply == NULL) {
-            KEYISOP_trace_log_error(correlationId, 0, title, "GetVersion error","Reply Null");
+            KEYISOP_trace_log_error(correlationId, KEYISOP_TRACELOG_WARNING_FLAG, title, "GetVersion error","Reply Null");
             dbus_message_unref(message);
             dbus_connection_unref(connection);
             result = STATUS_FAILED;
@@ -1039,7 +1049,7 @@ static int _dbus_kmpp_call_get_version_sync(
 
         // Reading the parameters from the reply
         if (!dbus_message_get_args(reply, &dbus_error, DBUS_TYPE_INT32, out_version, DBUS_TYPE_INVALID)) {
-            KEYISOP_trace_log_error_para(correlationId, 0, title,"GetVersion failed","Failed get parameters from reply",  "Error getting message args (%s)", dbus_error.message);
+            KEYISOP_trace_log_error_para(correlationId, KEYISOP_TRACELOG_WARNING_FLAG, title,"GetVersion failed","Failed get parameters from reply",  "Error getting message args (%s)", dbus_error.message);
             dbus_error_free(&dbus_error);
             dbus_message_unref(reply);
             dbus_message_unref(message);

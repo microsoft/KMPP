@@ -31,6 +31,7 @@ extern "C" {
 */
 
 #define KEYISO_ADD_OVERFLOW(a, b, res) __builtin_add_overflow(a, b, res)
+#define KEYISO_SUB_OVERFLOW(a, b, res) __builtin_sub_overflow(a, b, res)
 #define KEYISO_MUL_OVERFLOW(a, b, res) __builtin_mul_overflow(a, b, res)
 
 // Includes NULL terminator character
@@ -61,8 +62,8 @@ extern "C" {
 #define KEYISO_CERT_CTRL_ENUM              4
 
 #define KEYISO_SECRET_SALT_LENGTH          4    // The client must knows this value for the serialization
-#define KEYISO_KDF_SALT_LEN                8    // The client must knows this value for the IPC (OP-TEE)
-#define KEYISO_SECRET_SALT_STR_BASE64_LEN  2 + KEYISOP_BASE64_ENCODE_LENGTH(KEYISO_SECRET_SALT_LENGTH + 16) // including null terminator 
+#define KEYISO_SECRET_SALT_STR_BASE64_LEGACY_LEN  2 + KEYISOP_BASE64_ENCODE_LENGTH(KEYISO_SECRET_SALT_LENGTH + 16) // including 0. prefix and null terminator
+#define KEYISO_SECRET_SALT_STR_BASE64_LEN  KEYISOP_BASE64_ENCODE_LENGTH(32 + 2) // including 0. prefix and null terminator
            
 // The rest of the execute flags are external and defined in keyisoutils.h. Only the ones below are internal and should not be exposed. 
 // Those values should be in correlation with the values in keyisoutils.h
@@ -93,9 +94,10 @@ typedef enum
 #define KEYISOP_VERSION_1          1
 #define KEYISOP_VERSION_2          2
 #define KEYISOP_VERSION_3          3
+#define KEYISOP_VERSION_4          4
 
 // service.version == KEYISOP_CURRENT_VERSION
-#define KEYISOP_CURRENT_VERSION                     KEYISOP_VERSION_3
+#define KEYISOP_CURRENT_VERSION                     KEYISOP_VERSION_4
 #define KEYISOP_FIPS_MIN_VERSION                    KEYISOP_VERSION_2
 #define KEYISOP_PKCS8_MIN_VERSION                   KEYISOP_VERSION_3
 
@@ -103,7 +105,7 @@ typedef enum
 
 #define KEYISO_RSA_PRIVATE_PKEY_MAGIC   0x32415352 // RSA2
 #define KEYISO_EC_PRIVATE_PKEY_MAGIC    0x32434345 // ECC2
-#define KEYISO_PKEY_MAGIC_UNINITIALIZED 0x00000000 // unitialized magic, for structs that don't fully support magic yet
+#define KEYISO_PKEY_MAGIC_UNINITIALIZED 0x00000000 // uninitialized magic, for structs that don't fully support magic yet
 
 #define KEYISO_AES_ENCRYPT_MODE     0
 #define KEYISO_AES_DECRYPT_MODE     1
@@ -113,6 +115,7 @@ typedef enum
 #define KMPP_AES_512_KEY_SIZE       64
 
 #define KMPP_SALT_SHA256_SIZE             32
+#define KMPP_MAX_SECRET_ID_SIZE           32 // Secret id in process-based is the GUID (size of UUID) and in TA is the extra salt that used to derive from HUK (32 bytes buffer)
 #define KMPP_HMAC_SHA256_KEY_SIZE         32
 #define KMPP_AES_256_HMAC_SHA256_KEY_SIZE KMPP_AES_256_KEY_SIZE + KMPP_HMAC_SHA256_KEY_SIZE
 
@@ -122,8 +125,9 @@ typedef enum
 #define KMPP_ONE_KILOBYTE 1024
 #define KMPP_ONE_MEGABYTE KMPP_ONE_KILOBYTE * KMPP_ONE_KILOBYTE
 #define KMPP_MAX_MESSAGE_SIZE KMPP_ONE_MEGABYTE * 32 // based on "max_message_size" which is the upper limit in GDBUS for a message size including pfx
+#define KEYISO_MAX_OPAQUE_DATA_LEN KMPP_MAX_MESSAGE_SIZE
 
-// Limit the keyId to the max message length that could retured    
+// Limit the keyId to the max message length that could returned    
 // in GDBUS after the initial encryption in base64 which is the format of the keyId
 #define KEYISO_MAX_KEY_ID_LEN KEYISOP_BASE64_ENCODE_LENGTH(KMPP_MAX_MESSAGE_SIZE) 
 
@@ -179,10 +183,10 @@ typedef enum
 #define KMPP_RSA_PSS_SALTLEN_AUTO_DIGEST_MAX             -4 
 
 #define VERSION_CHAR                  'n' // The first byte of the keyId is 'n' for new versions and 0 for legacy code
-#define EXTRA_DATA_DELIMITER          ':'
-#define MIN_EXTRA_DATA_LENGTH         sizeof(KEYISO_ENCRYPTION_EXTRA_DATA_HEADER_ST)
-#define MAX_EXTRA_DATA_LENGTH         sizeof(KEYISO_KMPP_SERVICE_EXTRA_DATA_ST) + KEYISO_SECRET_SALT_STR_BASE64_LEN
-#define MAX_EXTRA_DATA_BASE64_LENGTH  KEYISOP_BASE64_ENCODE_LENGTH(MAX_EXTRA_DATA_LENGTH)
+#define CLIENT_DATA_DELIMITER          ':'
+#define MIN_CLIENT_DATA_LENGTH         sizeof(KEYISO_CLIENT_KEYID_HEADER_ST)
+#define MIN_CLIENT_DATA_LENGTH_BASE64_LEN  KEYISOP_BASE64_ENCODE_LENGTH(MIN_CLIENT_DATA_LENGTH)
+#define MAX_CLIENT_DATA_BASE64_LENGTH  KMPP_MAX_MESSAGE_SIZE
 
 // Log provider defines
 typedef enum
@@ -229,18 +233,18 @@ struct KeyIso_key_details_st
     unsigned long        keyId;
     int                  keyLength;
     unsigned char        *keyBytes;      // Allocation included in outer struct
-    char                 *salt;          // Allocation included in outer struct
+    void                 *clientData;     // Points to KEYISO_CLIENT_DATA_ST structure
     void                 *interfaceSession;
 }; 
 
 
 typedef struct KeyIso_key_ctx_st KEYISO_KEY_CTX;
 struct KeyIso_key_ctx_st {
-    KeyIsoSolutionType         keyProviderType; // Process Based/TEE/TZ
     uuid_t                     correlationId;
     void                       *pkey;
     void                       *keyDetails;
     bool                       isP8Key;  // Indication whether the encrypted key is pkcs#8 or does it expects the pkcs#12 format(BC)
+    void                       *keysInUseCtx; //An opaque handle for the keys in use context
 };
 
 typedef struct KeyIso_rsa_sign_st KEYISO_RSA_SIGN;
@@ -310,22 +314,35 @@ struct keyiso_ec_public_key_st {
     uint8_t  ecPubKeyBytes[];
 };
 
-// Forward declaration that also exists in keyisoipccommands.h, defined here as well to avoid circular dependencies
-typedef struct keyiso_encrypted_private_key_st KEYISO_ENCRYPTED_PRIV_KEY_ST;
+// Header sent from the service 
+// Contains version and isolation solution that the key was created by
+#define NUM_OF_CLIENT_METADATA_HEADER_IN_ELEMENTS 2
+typedef struct keyiso_client_metadata_header_st {
+    uint8_t version;
+    uint16_t isolationSolution;
+} __attribute__((packed)) KEYISO_CLIENT_METADATA_HEADER_ST;
 
-typedef struct keyiso_encryption_extra_data_header_st KEYISO_ENCRYPTION_EXTRA_DATA_HEADER_ST;
-struct keyiso_encryption_extra_data_header_st {
-    uint16_t version;
-    KeyIsoSolutionType solutionType;
+typedef enum {
+    KmppKeyIdType_asymmetric = 0,
+    KmppKeyIdType_symmetric,
+    KmppKeyIdType_max
+} KmppKeyIdType;
+
+// KeyId metadata header
+typedef struct keyiso_client_keyid_header_st KEYISO_CLIENT_KEYID_HEADER_ST;
+struct keyiso_client_keyid_header_st {
+    uint8_t clientVersion;       // Version of the client that created the keyid 
+    uint8_t keyServiceVersion;   // Version of the service that created the key
+    uint16_t isolationSolution;  // Isolation solution used to create the key
+    KmppKeyIdType keyType;       // Symmetric/Asymmetric key-id type
 };
-  
 
-// This struct is currently suitable for both process and TEE solutions, if there will be a need for a different struct for TEE, it should be added here
-typedef struct keyiso_kmpp_service_extra_data_st KEYISO_KMPP_SERVICE_EXTRA_DATA_ST;
-struct keyiso_kmpp_service_extra_data_st {
-    KEYISO_ENCRYPTION_EXTRA_DATA_HEADER_ST header;
-    uint32_t saltLength;
-    uint8_t salt[];
+// Client data structure - Asymmetric key - Formted to keyid by the client
+typedef struct keyiso_encryption_extra_data_header_st KEYISO_CLIENT_DATA_ST;
+struct keyiso_encryption_extra_data_header_st {
+    KEYISO_CLIENT_KEYID_HEADER_ST keyIdHeader;   // KeyId metadata header
+    uint32_t pubKeyLen;  
+    uint8_t pubKeyBytes[]; // ASN1 encoded public key 
 };
 
 #define NUM_OF_RSA_PRIVATE_ENC_DEC_IN_PARAMS_ELEMENTS 6
@@ -343,20 +360,61 @@ struct keyiso_rsa_private_encrypt_decrypt_input_params_st {
 *    Functions
 */
 
-// Implemented in keyisoutils.c
-int KeyIso_get_salt_from_keyid(
-    const uuid_t correlationId,
-    KeyIsoSolutionType expectedSolutionType,
-    const char *keyId, // Expects new version keyid format:  'n' <Base64 ExtraDataBuffer> ':' <Base64 PFX>
-    unsigned int encodedExtraDataLength,
-    char **outSalt);
+static inline bool KeyIso_is_legacy(const char *keyId) {
+    return (keyId && (keyId[0] != VERSION_CHAR));
+}
+
+static inline size_t KeyIso_get_client_data_maximum(const char *keyId) {
+    return KeyIso_is_legacy(keyId) ? KEYISO_SECRET_SALT_STR_BASE64_LEGACY_LEN : MAX_CLIENT_DATA_BASE64_LENGTH + 1;
+}
+
+static inline size_t KeyIso_get_client_data_minimum(const char *keyId) 
+{
+    return KeyIso_is_legacy(keyId) ? KEYISO_SECRET_SALT_STR_BASE64_LEGACY_LEN - 1 : MIN_CLIENT_DATA_LENGTH_BASE64_LEN;
+}
 
 // Implemented in keyisolog.c
 void KeyIso_set_log_provider(
     KeyisoLogProvider provider);
 
+/*
+//     Common Utils Functions 
+//     implemented in keyisoutils.c
+*/
 
-// Implemented in keyisoutils.c
+bool KeyIso_is_valid_keyid_header(
+    const uuid_t correlationId,
+    KeyIsoSolutionType expectedSolutionType,
+    const KEYISO_CLIENT_KEYID_HEADER_ST* keyIdHeader);
+
+// Find delimiter between client data and PFX bytes
+const char *KeyIso_get_delimiter_ptr(const char *keyId);
+
+// Extracts the client data from the keyId, used also by the gdbus service(KMPP key opened by MScrypt client)
+int KeyIso_get_client_data_from_keyid(
+    const uuid_t correlationId,
+    KeyIsoSolutionType expectedSolutionType,
+    const char *keyId, // Expects new version keyid format:  'n' <Base64 ExtraDataBuffer> ':' <Base64 PFX>
+    char **clientData); // Base64 encoded string, KeyIso_free()
+
+char* KeyIso_get_base64_client_data(
+    const uuid_t correlationId,
+    const char *title,
+    const KEYISO_CLIENT_DATA_ST  *clientDataSt);
+
+// Decode client client data string from base 64 format and validate.
+int KeyIso_decode_and_validate_base64_client_data(
+    const uuid_t correlationId,
+    const char *clientDataStr,
+    KEYISO_CLIENT_DATA_ST **outDecodedClientData,
+    uint32_t *outClientDataLen);
+
+// Extracts the client data from the PFX bytes
+int KeyIso_get_client_data_from_key_bytes(
+    const uuid_t correlationId, 
+    const char *clientDataStr, 
+    KEYISO_CLIENT_DATA_ST **outClientData);
+
 void KeyIsoP_set_execute_flags_internal(
     int flags);
     
@@ -364,7 +422,6 @@ unsigned int KeyIsoP_read_version_file(
     const uuid_t correlationId,
     const char *filename);
 
-// Implemented in keyisoutils.c
 // Placed here so will not be exposed to KMPP users
 // Returns number of encoded bytes. For a decode error returns -1.
 int KeyIso_base64_encode(
@@ -373,16 +430,17 @@ int KeyIso_base64_encode(
     int bytesLength,
     char **str);      // KeyIso_free()
 
-size_t KeyIso_get_rsa_pkey_bytes_len(const KEYISO_RSA_PKEY_ST *rsaPkeySt);
-size_t KeyIso_get_ec_pkey_bytes_len(const KEYISO_EC_PKEY_ST *ecPkeySt);
-size_t KeyIso_get_enc_key_bytes_len(const uuid_t correlationId, uint32_t saltLen, uint32_t ivLen, uint32_t hmacLen, uint32_t encKeyLen);
-size_t KeyIso_get_rsa_enc_dec_with_attached_key_in_dynamic_bytes_len(const uuid_t correlationId, uint32_t saltLen, uint32_t ivLen, uint32_t hmacLen, uint32_t encKeyLen, uint32_t fromBytesLen, uint32_t labelLen);
-size_t KeyIso_get_ecdsa_sign_with_attached_key_in_dynamic_bytes_len(const uuid_t correlationId, uint32_t saltLen, uint32_t ivLen, uint32_t hmacLen, uint32_t encKeyLen, uint32_t digestLen);
-size_t KeyIso_get_rsa_enc_dec_params_dynamic_len(uint32_t fromBytesLen, uint32_t labelLen);
+int KeyIso_get_rsa_pkey_bytes_len(const KEYISO_RSA_PKEY_ST *rsaPkeySt, uint32_t *outLen);
+int KeyIso_get_ec_pkey_bytes_len(const KEYISO_EC_PKEY_ST *ecPkeySt, uint32_t *outLen);
+int KeyIso_get_enc_key_bytes_len_params(const uuid_t correlationId, uint32_t secretSaltLen, uint32_t ivLen, uint32_t hmacLen, uint32_t encKeyLen, uint32_t secretIdLen, uint32_t *outLen);
+int KeyIso_get_rsa_enc_dec_with_attached_key_in_dynamic_bytes_len(const uuid_t correlationId, uint32_t publicKeyLen, uint32_t opaqueEncKeyLen, uint32_t fromBytesLen, uint32_t labelLen, uint32_t *outLen);
+int KeyIso_get_ecdsa_sign_with_attached_key_in_dynamic_bytes_len(const uuid_t correlationId, uint32_t publicKeyLen, uint32_t opaqueEncKeyLen, uint32_t digestLen, uint32_t *outLen);
+int KeyIso_get_rsa_enc_dec_params_dynamic_len(uint32_t fromBytesLen, uint32_t labelLen, uint32_t *outLen);
 void KeyIso_fill_rsa_enc_dec_param(KEYISO_RSA_PRIVATE_ENC_DEC_IN_PARAMS_ST *params, int decrypt, int padding, int tlen, int flen, int labelLen,const unsigned char *bytes);
 
 // Helper function to get the size of the padded key (PKCS#7 padding)
 unsigned int KeyIso_get_key_padded_size(const unsigned int inLength);
+
 // Puts the size into outLength and returns status if the calculation was succeeded
 int KeyIso_symmetric_key_encrypt_decrypt_size(
     const int mode,
@@ -407,6 +465,7 @@ int KeyIso_retrieve_evp_pkey_sign_data(
     const unsigned char *from, 
     int tlen,
     KEYISO_EVP_PKEY_SIGN *pkeySign);
+
 /*
 //     PFX Common Functions 
 //     implemented in keyisopfxcommon.c
@@ -453,8 +512,9 @@ int KeyIso_pkcs12_parse_p8(
     STACK_OF(X509) **outCa);
 
 int KeyIso_create_enckey_from_p8(
-    const X509_SIG *inP8,
-    KEYISO_ENCRYPTED_PRIV_KEY_ST **outEncKey);
+    const X509_SIG *p8,
+    unsigned int *opaqueEncryptedKeyLen,
+    unsigned char **opaqueEncryptedKey);
 
 // Helper function for Key Generation
 // OpenSSL Conf string loading.

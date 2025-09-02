@@ -76,6 +76,7 @@ extern int KEYISOP_traceLogConstructor;
 #define KEYISOP_CLIENT_CONFIG              "KMPPClientConfig"
 #define KEYISOP_VALIDATE_KEY_TITLE         "KMPPValidateKeyId"
 #define KEYISOP_KMPP_ALLOWED_APPS_TITLE    "KMPPAllowedAppsConfig"
+#define KEYISOP_INIT_KEY_CONTEXT_TITLE     "KMPPInitKeyContext"
 // TPM
 #define KEYISOP_TPM_SESSION_TITLE              "KMPPTpmSession"
 #define KEYISOP_TPM_KEY_TITLE                  "KMPPTpmKey"
@@ -94,6 +95,9 @@ extern int KEYISOP_traceLogConstructor;
 #define KEYISOP_TPM_SYMMETRIC_ENC_DEC_TITLE    "KMPPTpmSymmetricEncDec"
 // Cache
 #define KEYISOP_CACHE_TITLE                    "KMPPCache"
+
+// Machine secret rotation
+#define KEYISOP_MACHINE_SECRET_ROTATION_TITLE "KMPPMachineSecretRotation"
 typedef enum {
     LogLevel_Error=3,
     LogLevel_Warning=4,

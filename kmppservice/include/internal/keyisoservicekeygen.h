@@ -39,19 +39,11 @@ extern "C" {
 ///////////// Internal Key Gen methods //////////////
 /////////////////////////////////////////////////////
 
-// Initializes static variables
-int KEYISO_EC_init_static(void);
-void KEYISO_EC_free_static(void);
-
 int KeyIso_rsa_key_generate(
     const uuid_t correlationId,
     unsigned int bitSize,
     unsigned int keyUsage,
     PSYMCRYPT_RSAKEY *pGeneratedKey);
-
-PSYMCRYPT_ECURVE KeyIso_get_curve_by_nid(
-    const uuid_t correlationId,
-    uint32_t groupNid);
 
 int KeyIso_ec_key_generate(
     const uuid_t correlationId, 
