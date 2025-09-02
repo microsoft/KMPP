@@ -242,20 +242,20 @@ int KeyIso_parse_pfx_provider_key_id(
     const uuid_t correlationId,
     const char *keyId,
     int *pfxLength,
-    unsigned char **pfxBytes,         // KeyIso_clear_free()
-    char **salt)                      // Optional, KeyIso_clear_free_string()
+    unsigned char **pfxBytes,     // KeyIso_clear_free()
+    char **clientData)            // Salt for legacy/ Client data for kmpp key, KeyIso_clear_free_string()
 {
-    return KeyIso_parse_pfx_engine_key_id(correlationId, keyId, pfxLength, pfxBytes, salt);
+    return KeyIso_parse_pfx_engine_key_id(correlationId, keyId, pfxLength, pfxBytes, clientData);
 }
 
 int KeyIso_format_pfx_provider_key_id(
     const uuid_t correlationId,
     int pfxLength,
     const unsigned char *pfxBytes,
-    const char *salt,
-    char **keyId)                     // KeyIso_clear_free_string()
+    const char *clientData,
+    char **keyId)                 // KeyIso_clear_free_string()
 {
-    return KeyIso_format_pfx_engine_key_id(correlationId, pfxLength, pfxBytes, salt, keyId);
+    return KeyIso_format_pfx_engine_key_id(correlationId, pfxLength, pfxBytes, clientData, keyId);
 }
 
 static int _provider_cmp(const OSSL_PROVIDER * const *a, const OSSL_PROVIDER * const *b)
@@ -327,26 +327,259 @@ size_t KeyIso_get_bn_param_len(const EVP_PKEY *pkey, const char *paramType, BIGN
     return paramLen;
 }
 
+////////////
+//  RSA  //
+//////////
+
 int KeyIso_get_rsa_params(
     const EVP_PKEY *pkey, 
-    BIGNUM **rsa_n,  // Modulus (public)
-    BIGNUM **rsa_e,  // Exponent (public)
-    BIGNUM **rsa_p,  // Prime1 (private)
-    BIGNUM **rsa_q)  // Prime2 (private)
+    BIGNUM **rsaN,  // Modulus (public)
+    BIGNUM **rsaE,  // Exponent (public)
+    BIGNUM **rsaP,  // Prime1 (private)
+    BIGNUM **rsaQ)  // Prime2 (private)
 {
-    if (pkey == NULL) {
+    if (pkey == NULL || rsaN == NULL || rsaE == NULL) {
         return STATUS_FAILED;
     }
 
     // Public parameters are mandatory
-    if (!EVP_PKEY_get_bn_param(pkey, OSSL_PKEY_PARAM_RSA_N, rsa_n) ||
-        !EVP_PKEY_get_bn_param(pkey, OSSL_PKEY_PARAM_RSA_E, rsa_e)) {
+    if (!EVP_PKEY_get_bn_param(pkey, OSSL_PKEY_PARAM_RSA_N, rsaN) ||
+        !EVP_PKEY_get_bn_param(pkey, OSSL_PKEY_PARAM_RSA_E, rsaE)) {
         return STATUS_FAILED;
     }
 
-    // Private parameters are optional
-    EVP_PKEY_get_bn_param(pkey, OSSL_PKEY_PARAM_RSA_FACTOR1, rsa_p);
-    EVP_PKEY_get_bn_param(pkey, OSSL_PKEY_PARAM_RSA_FACTOR2, rsa_q);
+    // Private parameters are 
+    EVP_PKEY_get_bn_param(pkey, OSSL_PKEY_PARAM_RSA_FACTOR1, rsaP);
+    EVP_PKEY_get_bn_param(pkey, OSSL_PKEY_PARAM_RSA_FACTOR2, rsaQ);
 
     return STATUS_OK;
 }
+
+
+#if 0
+//Creates an EVP_PKEY containing an RSA public from the provided modulus and exponent
+int KeyIso_get_rsa_evp_pub_key(
+    const uint8_t *modulus,
+    size_t modulusLen,                            
+    const uint8_t *exponent,
+    size_t exponentLen,
+    EVP_PKEY **outPkey)
+{
+    if (modulus == NULL || modulusLen == 0 || exponent == NULL || exponentLen == 0 || outPkey == NULL) {
+        KEYISOP_trace_log_error(NULL, 0, KEYISOP_GEN_KEY_TITLE, "Invalid input", "NULL parameter or zero length");
+        return STATUS_FAILED;
+    }
+    *outPkey = NULL;
+
+    // Create parameter context for RSA
+    EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new_from_name(NULL, "RSA", KMPP_OSSL_PROVIDER_DEFAULT);
+    if (ctx == NULL) {
+        KEYISOP_trace_log_error(NULL, 0, KEYISOP_GEN_KEY_TITLE, "Failed to create EVP_PKEY_CTX", "EVP_PKEY_CTX_new_from_name failed");
+        return STATUS_FAILED;
+    }
+
+    // Set up public key parameters from data buffer
+    OSSL_PARAM params[] = {
+        OSSL_PARAM_construct_BN(OSSL_PKEY_PARAM_RSA_N, (unsigned char*)modulus, modulusLen),
+        OSSL_PARAM_construct_BN(OSSL_PKEY_PARAM_RSA_E, (unsigned char*)exponent, exponentLen),
+        OSSL_PARAM_construct_end()
+    };
+
+    // Create EVP_PKEY with parameters
+    EVP_PKEY *pkey = NULL;
+    if (EVP_PKEY_fromdata_init(ctx) <= 0) {
+        KEYISOP_trace_log_error(NULL, 0, KEYISOP_GEN_KEY_TITLE, "Failed to initialize fromdata operation", "EVP_PKEY_fromdata_init failed");
+        EVP_PKEY_CTX_free(ctx);
+        return STATUS_FAILED;
+    }
+
+    if (EVP_PKEY_fromdata(ctx, &pkey, EVP_PKEY_PUBLIC_KEY, params) <= 0) {
+        KEYISOP_trace_log_error(NULL, 0, KEYISOP_GEN_KEY_TITLE, "Failed to create EVP_PKEY from data", "EVP_PKEY_fromdata failed");
+        EVP_PKEY_CTX_free(ctx);
+        return STATUS_FAILED;
+    }
+
+    *outPkey = pkey;
+    EVP_PKEY_CTX_free(ctx);
+
+    return STATUS_OK;
+}
+#endif
+ 
+////////////
+//  ECC  //
+//////////
+
+// TODO: Once ECC support is added to the providers the following functions will be enabled.
+
+#if 0 
+// Get the public components from an ECC private key
+int KeyIso_get_ecc_params(
+    const EVP_PKEY *privKey,
+    unsigned char **pubKey,      // KeyIso_clear_free()
+    size_t *pubKeyLen,
+    char **groupName)           // KeyIso_clear_free() if requested, NULL if not needed
+{
+    if (!privKey || !pubKey || !pubKeyLen || !groupName) {
+        return STATUS_FAILED;
+    }
+
+    size_t nameLen = 0;
+    size_t keyLen = 0;
+
+    *pubKey = NULL;
+    *pubKeyLen = 0;
+    *groupName = NULL;
+
+    // Get required sizes
+    if (!EVP_PKEY_get_octet_string_param(privKey, OSSL_PKEY_PARAM_PUB_KEY, NULL, 0, &keyLen)) {
+        return STATUS_FAILED;
+    }
+
+    if (!EVP_PKEY_get_utf8_string_param(privKey, OSSL_PKEY_PARAM_GROUP_NAME, NULL, 0, &nameLen)) {
+        return STATUS_FAILED;
+    }
+
+    // Allocate buffers for the key and group name
+    unsigned char *keyBuf = KeyIso_zalloc(keyLen);
+    if (!keyBuf) {
+        return STATUS_FAILED;
+    }
+
+    char *nameBuf = KeyIso_zalloc(nameLen);
+    if (!nameBuf) {
+        KeyIso_free(keyBuf);
+        return STATUS_FAILED;
+    }
+
+    //  Extract values into allocated buffers
+    if (!EVP_PKEY_get_utf8_string_param(privKey, OSSL_PKEY_PARAM_GROUP_NAME, nameBuf, nameLen, NULL)) {
+        KeyIso_free(nameBuf);
+        KeyIso_free(keyBuf);
+        return STATUS_FAILED;
+    }
+
+    if (!EVP_PKEY_get_octet_string_param(privKey, OSSL_PKEY_PARAM_PUB_KEY, keyBuf, keyLen , NULL)) {
+        KeyIso_free(nameBuf);
+        KeyIso_free(keyBuf);
+        return STATUS_FAILED;
+    }
+
+    // Assign output values
+    *pubKey = keyBuf;
+    *pubKeyLen = keyLen;
+    *groupName = nameBuf;
+
+    return STATUS_OK;
+}
+
+//Creates an EVP_PKEY containing an ECC public from the provided public components
+int KeyIso_create_ec_evp_pub_key(
+    uint32_t curveNid,
+    const uint8_t *pubKey,
+    size_t pubKeyLen,
+    EVP_PKEY **outPkey)
+{
+    if (pubKey == NULL || pubKeyLen == 0 || outPkey == NULL) {
+        KEYISOP_trace_log_error(NULL, 0, KEYISOP_GEN_KEY_TITLE, "Invalid input", "NULL parameter or zero length");
+        return STATUS_FAILED;
+    }
+    *outPkey = NULL;
+
+    // Create parameter context for EC
+    EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_from_name(NULL, "EC", KMPP_OSSL_PROVIDER_DEFAULT);
+    if (ctx == NULL) {
+        KEYISOP_trace_log_error(NULL, 0, KEYISOP_GEN_KEY_TITLE, "Failed to create EVP_PKEY_CTX", "EVP_PKEY_CTX_new_from_name failed");
+        return STATUS_FAILED;
+    }
+
+    if (EVP_PKEY_fromdata_init(ctx) <= 0) {
+        KEYISOP_trace_log_error(NULL, 0, KEYISOP_GEN_KEY_TITLE, "Failed to initialize fromdata operation", "EVP_PKEY_fromdata_init failed");
+        EVP_PKEY_CTX_free(ctx);
+        return STATUS_FAILED;
+    }
+
+    // Get the group name from the curve NID
+    const char *groupName = OBJ_nid2sn(curveNid);
+    if (groupName == NULL) {
+        KEYISOP_trace_log_error(NULL, 0, KEYISOP_GEN_KEY_TITLE, "Failed to get group name", "OBJ_nid2sn failed");
+        EVP_PKEY_CTX_free(ctx);
+        return STATUS_FAILED;
+    }
+    // print the group name for debug
+    KEYISOP_trace_log_para(NULL, 0, KEYISOP_GEN_KEY_TITLE, "", "######### curveNid:%d Group name: %s", curveNid, groupName); // DEBUG!!!
+
+
+    // Allocate buffer and copy pubKey data explicitly
+    unsigned char *pubKeyCopy = KeyIso_zalloc(pubKeyLen);
+    if (!pubKeyCopy) {
+        EVP_PKEY_CTX_free(ctx);
+        return STATUS_FAILED;
+    }
+    memcpy(pubKeyCopy, pubKey, pubKeyLen);
+
+
+    // Set up public key parameters from data buffer
+    OSSL_PARAM params[] = {
+        OSSL_PARAM_construct_utf8_string(OSSL_PKEY_PARAM_GROUP_NAME, (char *)groupName, 0),
+        OSSL_PARAM_construct_octet_string(OSSL_PKEY_PARAM_PUB_KEY, pubKeyCopy, pubKeyLen),
+        OSSL_PARAM_construct_end()
+    };
+
+    // Create EVP_PKEY with parameters
+    EVP_PKEY* pkey = NULL;
+    if (EVP_PKEY_fromdata(ctx, &pkey, EVP_PKEY_PUBLIC_KEY, params) <= 0) {
+        KEYISOP_trace_log_error(NULL, 0, KEYISOP_GEN_KEY_TITLE, "Failed to create EVP_PKEY from data", "EVP_PKEY_fromdata failed");
+        KeyIso_free(pubKeyCopy);
+        EVP_PKEY_CTX_free(ctx);
+        return STATUS_FAILED;
+    }
+
+    *outPkey = pkey;
+    KeyIso_free(pubKeyCopy);
+    EVP_PKEY_CTX_free(ctx);
+
+    return STATUS_OK;
+}
+
+// Extracts the public key component from an ECC private key
+EVP_PKEY* KeyIso_get_ec_public_key(
+    const uuid_t correlationId,
+    const EVP_PKEY *privKey) 
+{
+    unsigned char *pubKeyBytes = NULL;
+    size_t pubKeyLen = 0;
+    char *groupName = NULL;
+    EVP_PKEY* pubKey = NULL;
+
+    if (privKey == NULL) {
+        return NULL;
+    }
+
+    // Get ECC public parameters
+    if (KeyIso_get_ecc_params(privKey, &pubKeyBytes, &pubKeyLen, &groupName) != STATUS_OK) {
+        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_GEN_KEY_TITLE, "Failed to get ECC parameters", NULL);
+        return NULL;
+    }
+
+    // Get curveNid out of the groupName
+    int curveNid = OBJ_sn2nid(groupName);
+    if (curveNid == 0) {
+        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_GEN_KEY_TITLE, "Failed to get curveNid", NULL);
+        KeyIso_free(pubKeyBytes);
+        KeyIso_free(groupName);
+        return NULL;
+    }
+
+    // Create public key from components
+    if (KeyIso_create_ec_evp_pub_key(curveNid, pubKeyBytes, pubKeyLen, &pubKey) != STATUS_OK) {
+        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_GEN_KEY_TITLE, "Failed to create public key", NULL);
+        pubKey = NULL;
+    }
+
+    KeyIso_free(pubKeyBytes);
+    KeyIso_free(groupName);
+    
+    return pubKey;
+}
+#endif

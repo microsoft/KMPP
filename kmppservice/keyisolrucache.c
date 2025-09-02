@@ -26,7 +26,7 @@ static uint32_t _hash(uint64_t uniqueHashKey)
 }
 
 // Create a cache according to the given capacity
-KMPP_LRU_CACHE *KeyIso_create_cache(uint32_t capacity, ValueFreeFunction valueFreeFunc, ValueRefCountFunction valueRefCountIncrementFunc)
+KMPP_LRU_CACHE *KeyIso_cache_create(uint32_t capacity, ValueFreeFunction valueFreeFunc, ValueRefCountFunction valueRefCountIncrementFunc)
 {
     const char *title = KEYISOP_CACHE_TITLE;
     if (capacity == 0) {

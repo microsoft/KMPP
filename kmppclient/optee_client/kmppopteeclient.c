@@ -282,11 +282,11 @@ IPC_REPLY_ST* KeyIso_optee_send(KEYISO_KEY_CTX *keyCtx, IPC_SEND_RECEIVE_ST *ipc
 
     //2. Send on IPC
 	res = TEEC_InvokeCommand(teecSess, ipcSt->command, &op, &returnOrigin);
-    KEYISOP_trace_log_para(keyCtx->correlationId, 0, KEYISOP_OPTEE_CLIENT_TITLE, "TEEC_InvokeCommand", 
+    KEYISOP_trace_log_para(keyCtx->correlationId, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_OPTEE_CLIENT_TITLE, "TEEC_InvokeCommand", 
         "Received %s response from KMPP TA - %lu", _get_command_string(ipcSt->command), op.params[1].tmpref.size);
 
     if ((res == TEEC_ERROR_SHORT_BUFFER) && (op.params[1].tmpref.size > estimatedOutStuctSize)) {
-        KEYISOP_trace_log_para(keyCtx->correlationId, 0, KEYISOP_OPTEE_CLIENT_TITLE, "TEEC_InvokeCommand",
+        KEYISOP_trace_log_para(keyCtx->correlationId, KEYISOP_TRACELOG_WARNING_FLAG, KEYISOP_OPTEE_CLIENT_TITLE, "TEEC_InvokeCommand",
             "KMPP TA asked for a larger output buf - estimated = %d actual = %lu\n", estimatedOutStuctSize, op.params[1].tmpref.size);
 
         uint8_t *biggerOutSt = (uint8_t *)KeyIso_realloc(outSt, op.params[1].tmpref.size);
@@ -301,7 +301,7 @@ IPC_REPLY_ST* KeyIso_optee_send(KEYISO_KEY_CTX *keyCtx, IPC_SEND_RECEIVE_ST *ipc
         op.params[1].tmpref.buffer = outSt;
         res = TEEC_InvokeCommand(teecSess, ipcSt->command, &op, &returnOrigin);
 
-        KEYISOP_trace_log_para(keyCtx->correlationId, 0, KEYISOP_OPTEE_CLIENT_TITLE, "TEEC_InvokeCommand",
+        KEYISOP_trace_log_para(keyCtx->correlationId, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_OPTEE_CLIENT_TITLE, "TEEC_InvokeCommand",
             "Received %s response from KMPP TA - %lu", _get_command_string(ipcSt->command), op.params[1].tmpref.size);
 	}
 

@@ -12,13 +12,13 @@
 #include "keyisomemory.h"
 #include "keyisoipccommands.h"
 #include "keyisoservicemsghandler.h"
-#include "keyisoservicekeygen.h"
 #include "keyisoservicekeylist.h"
 
 #include "kmppta.h"
 #include "keyisolog.h"
 #include "kmppsymcryptwrapper.h"
 #include "keyisoservicecommon.h"
+#include "keyisosymcryptcommon.h"
 #include "user_ta_header_defines.h"
 
 #define NUM_TEE_PARAMS 4
@@ -51,7 +51,7 @@ static TEE_Result _checkClientIdentity(void)
 }
 
 // Derive a unique key from the HUK to be used as the machine secret key for the KMPP TA
-static TEE_Result _derive_unique_key(uint8_t *key, uint16_t keySize, uint8_t *extra, uint16_t extraSize)
+static TEE_Result _derive_unique_key(uint8_t *key, uint16_t keySize, const uint8_t *extra, uint16_t extraSize)
 {
 	TEE_TASessionHandle ptaSession = TEE_HANDLE_NULL;
 	TEE_Param params[TEE_NUM_PARAMS] = { };
@@ -63,7 +63,7 @@ static TEE_Result _derive_unique_key(uint8_t *key, uint16_t keySize, uint8_t *ex
 		return res;
 
 	if (extra && extraSize) {
-		params[0].memref.buffer = extra;
+		params[0].memref.buffer = (uint8_t *)extra;
 		params[0].memref.size = extraSize;
 	}
 
@@ -78,6 +78,8 @@ static TEE_Result _derive_unique_key(uint8_t *key, uint16_t keySize, uint8_t *ex
 }
 
 // It is the responsibility of the calling function to clear and delete the key after use
+// This function will be removed once symmetric key will fully migrated to use 
+// key rotation mechanism instead of legacy mechanism.
 static int _get_machine_secret(    
     uint8_t *hukKey, 
     uint16_t hukKeySize) 
@@ -126,6 +128,98 @@ static int _get_machine_secret(
 	return STATUS_OK;
 }
 
+// The KMPP TA does not maintain a legacy machine secret. 
+// This function is used only for symmetric key operations, where a legacy 
+// mechanism is applied due to the absence of a key rotation process at this stage.
+static const uint8_t *_get_legacy_machine_secret_for_symmetric_key(void)
+{
+	static uint8_t legacyMachineSecret[KEYISO_SECRET_FILE_LENGTH] = {0};
+
+	if (legacyMachineSecret[0] == 0) {
+		if (_get_machine_secret(legacyMachineSecret, sizeof(legacyMachineSecret)) != STATUS_OK) {
+			KEYISOP_trace_log_error(NULL, 0, KEYISOP_SERVICE_TITLE, "Failed get legacy machine secret", "Failed to derive legacy machine secret");
+			return NULL;
+		}
+	}
+
+	return legacyMachineSecret;
+}
+
+static int _get_derived_key_by_id(
+	const uuid_t correlationId,
+	uint32_t extraSaltSize,
+	const uint8_t *extraSalt, // static random buffer in size of KMPP_MAX_SECRET_ID_SIZE (32 bytes)
+	uint32_t *hukKeySize,
+	uint8_t **hukKey) 
+{
+	if (!extraSalt || !hukKey || !hukKeySize) {
+		KEYISOP_trace_log_error(correlationId, 0, KEYISOP_SERVICE_TITLE, "Invalid parameters", "guid or size or value is NULL");
+		return STATUS_FAILED;
+	}
+
+	TEE_Result res = TEE_ERROR_GENERIC;
+	*hukKeySize = TA_DERIVED_KEY_MAX_SIZE;
+
+	// Allocate memory for the key buffer before using it
+    *hukKey = TEE_Malloc(*hukKeySize, 0);
+    if (!*hukKey) {
+        return TEE_ERROR_OUT_OF_MEMORY;
+    }
+	
+	res = _derive_unique_key(*hukKey, TA_DERIVED_KEY_MAX_SIZE, extraSalt, extraSaltSize);
+	if (res != TEE_SUCCESS) {
+		KEYISOP_trace_log_error_para(correlationId, 0, KEYISOP_SERVICE_TITLE, "Failed derive unique key", "Invalid parameter", "derive_unique_key failed: returned %x", res);
+		memzero_explicit(*hukKey, *hukKeySize);
+		TEE_Free(*hukKey);
+		*hukKey = NULL;
+		return STATUS_FAILED;
+	}
+
+	return STATUS_OK;
+}
+
+// This function is invoked during the "open private key" flow to retrieve the machine secret
+// associated with the provided secret ID that is being used as extra salt in TA.
+static int _get_secret_by_id(
+	const uuid_t correlationId,
+	uint32_t extraSaltSize,
+	const uint8_t *extraSalt, // static random buffer in size of KMPP_MAX_SECRET_ID_SIZE (32 bytes)
+	uint32_t *outValueSize,
+	uint8_t **outValue) // Caller must free this memory, KeyIso_clear_free
+{
+	if (extraSaltSize != KMPP_MAX_SECRET_ID_SIZE) {
+		KEYISOP_trace_log_error(correlationId, 0, KEYISOP_SERVICE_TITLE, "Invalid extra salt size", "Expected size is 32 bytes");
+		return STATUS_FAILED;
+	}
+
+	return _get_derived_key_by_id(correlationId, extraSaltSize, extraSalt, outValueSize, outValue);
+}
+
+// This function is triggered during the "import private key" flow when the 
+// The extra salt, which is higher layer known as "secret id" is randomly generated and set to 32 bytes, to be used for deriving the machine secret
+static int _get_current_valid_secret(
+	const uuid_t correlationId, 
+    uint32_t *outExtraSaltSize,
+    uint8_t *outExtraSalt, // static random buffer in size of KMPP_MAX_SECRET_ID_SIZE (32 bytes)
+    uint32_t *outValueSize,
+    uint8_t **outValue)
+{
+	if (!outExtraSalt || !outExtraSaltSize || !outValueSize || !outValue) {
+		KEYISOP_trace_log_error(correlationId, 0, KEYISOP_SERVICE_TITLE, "Invalid parameters", "Output guid, size or value is NULL");
+		return STATUS_FAILED;
+	}
+
+	// Calculate random extra salt in size of 32
+	*outExtraSaltSize = KMPP_MAX_SECRET_ID_SIZE;
+	if (KeyIso_rand_bytes(outExtraSalt, *outExtraSaltSize) != STATUS_OK) {
+		KEYISOP_trace_log_error(correlationId, 0, KEYISOP_SERVICE_TITLE, "Failed get machine secret", "Failed to generate random bytes");
+		return STATUS_FAILED;
+	}	
+
+	return _get_derived_key_by_id(correlationId, *outExtraSaltSize, outExtraSalt, outValueSize, outValue);
+}	
+
+
 //////////////////////////////////////////////////////////////////////////////////////////////////////
 /*
  		TA life cycle handlers
@@ -147,10 +241,13 @@ TEE_Result TA_CreateEntryPoint(void)
 	}
 
 	// Set the key derivation function to be used as the machine secret key for the KMPP TA
-	KeyIso_set_machine_secret_method(NULL, _get_machine_secret);
+	KeyIso_set_secret_methods(_get_current_valid_secret, _get_secret_by_id, _get_legacy_machine_secret_for_symmetric_key);
 	
-	//Initialize the salt validation flag
+	// Initialize the salt validation flag
 	g_isSaltValidationRequired = false;
+
+	// Initialize the isolation solution type
+	g_isolationSolutionType = KeyIsoSolutionType_tz;
 
 	// Calling the ECC init function to initialize the ECC curves
 	KEYISO_EC_init_static();
@@ -185,8 +282,6 @@ TEE_Result TA_OpenSessionEntryPoint(uint32_t paramTypes, TEE_Param params[NUM_TE
 												TEE_PARAM_TYPE_NONE,
 												TEE_PARAM_TYPE_NONE);
 
-	KEYISOP_trace_log(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_SERVICE_TITLE, "has been called");
-
 	if (paramTypes != expectedParamTypes)
 		return TEE_ERROR_BAD_PARAMETERS;
 
@@ -206,8 +301,6 @@ TEE_Result TA_OpenSessionEntryPoint(uint32_t paramTypes, TEE_Param params[NUM_TE
 		*sessCtx = (void *)session;
 	} else {
 		*sessCtx = NULL;
-		KEYISOP_trace_log_error(NULL, KEYISOP_TRACELOG_WARNING_FLAG, KEYISOP_SERVICE_TITLE, "", "Session: No need to allocate session data");
-
 	}
 
 	params[1].value.a = KEYISOP_CURRENT_VERSION;
@@ -220,12 +313,10 @@ TEE_Result TA_OpenSessionEntryPoint(uint32_t paramTypes, TEE_Param params[NUM_TE
 // Called when a session is closed, sessCtx holds the value that was assigned by TA_OpenSessionEntryPoint.
 void TA_CloseSessionEntryPoint(void *sessCtx)
 {
-	KEYISOP_trace_log_para(NULL, 0, KEYISOP_SERVICE_TITLE, "", "Close the session\n");
+	KEYISOP_trace_log_para(NULL, 0, KEYISOP_SERVICE_TITLE, "", "Close the session");
 	if (sessCtx) {
 		char *session = (char*)sessCtx;
-		KEYISOP_trace_log_para(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_SERVICE_TITLE, "Session %p: release session", sessCtx);
 		KeyIso_remove_sender_keys_from_list(session);
-		
 		TEE_Free(session);
 	}
 }

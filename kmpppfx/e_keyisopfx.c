@@ -37,6 +37,7 @@
 #include "keyisoutils.h"
 
 extern KEYISO_CLIENT_CONFIG_ST g_config;
+extern KEYISO_KEYSINUSE_ST g_keysinuse;
 static const char *engine_kmpppfx_id = KMPP_ENGINE_ID;
 static const char *engine_kmpppfx_name = KMPP_ENGINE_NAME;
 
@@ -418,8 +419,8 @@ static int kmpppfx_init(ENGINE *e)
 #ifndef KMPP_TELEMETRY_DISABLED
     // Setting the counters threshold according to environment variables
     int countTh = 0, timeTh = 0; 
-    KeyIso_init_counter_th(&countTh, &timeTh, g_config.solutionType);
-    KEYISOP_trace_metric_para(NULL, 0, g_config.solutionType, KEYISOP_ENGINE_TITLE, NULL,"Engine Init - counters and time thresholds: %d, %d", countTh, timeTh);
+    KeyIso_init_counter_th(&countTh, &timeTh, g_config.solutionType, g_keysinuse.isLibraryLoaded);
+    KEYISOP_trace_metric_para(NULL, 0, g_config.solutionType, g_keysinuse.isLibraryLoaded, KEYISOP_ENGINE_TITLE, NULL,"Engine Init - counters and time thresholds: %d, %d", countTh, timeTh);
 #endif
 
     return 1;
@@ -429,7 +430,7 @@ static int kmpppfx_init(ENGINE *e)
         kmpppfx_ctx_free(ctx);
     }
     KMPPPFXerr(KMPPPFX_F_INIT, KMPPPFX_R_ALLOC_FAILURE);
-    KEYISOP_trace_metric_error(NULL, 0, g_config.solutionType, KEYISOP_ENGINE_TITLE, loc, "Failed");
+    KEYISOP_trace_metric_error(NULL, 0, g_config.solutionType, g_keysinuse.isLibraryLoaded, KEYISOP_ENGINE_TITLE, loc, "Failed");
     return 0;
 }
 
@@ -485,6 +486,11 @@ static int bind_kmpppfx(ENGINE *e)
         goto memerr;
 
     _trace_log_configuration();
+
+    // Load KeysInUse library during engine initialization
+    if (!g_keysinuse.isLibraryLoaded) {
+        KeyIso_load_keysInUse_library();
+    }
 
     /* Setup RSA_METHOD */
     RSA_meth_set1_name(kmpppfx_rsa_method, "KMPP PFX RSA method");
@@ -586,7 +592,7 @@ static int kmpppfx_load(ENGINE *eng, const char *key_id,
     uuid_t correlationId;
     int pfxLength = 0;
     unsigned char *pfxBytes = NULL;     // KeyIso_free()
-    char *salt = NULL;                  // KeyIso_clear_free_string()
+    char *clientData = NULL;                  // KeyIso_clear_free_string()
     bool isKeyP8Compatible ;
     bool isServiceP8Compatible = (PKCS8_COMPATIBLE == _get_p8_compatibility_mode_once());
 
@@ -617,7 +623,7 @@ static int kmpppfx_load(ENGINE *eng, const char *key_id,
             key_id,
             &pfxLength,
             &pfxBytes,
-            &salt)) {
+            &clientData)) {
         KMPPPFXerr(KMPPPFX_F_LOAD, KMPPPFX_R_PARSE_PFX_KEY_ID_ERROR);
         loc = "KeyIso_parse_pfx_engine_key_id";
         goto err;
@@ -625,11 +631,19 @@ static int kmpppfx_load(ENGINE *eng, const char *key_id,
     
     isKeyP8Compatible = !KeyIso_is_oid_pbe2(correlationId, pfxBytes, pfxLength);
 
-    if (!KeyIso_load_pfx_pubkey(correlationId, pfxLength, pfxBytes, pkey, cert, ca)) {
-        KMPPPFXerr(KMPPPFX_F_LOAD, KMPPPFX_R_LOAD_PFX_PUBKEY_ERROR);
-        loc = "KeyIso_load_pfx_pubkey";
+    if (!KeyIso_open_key_by_compatibility(correlationId, &key->keyCtx, pfxBytes, pfxLength, clientData, isKeyP8Compatible, isServiceP8Compatible)) {
+        KMPPPFXerr(KMPPPFX_F_LOAD, KMPPPFX_R_PFX_OPEN_ERROR);
+        loc = "KeyIso_open_key_by_compatibility";
         goto err;
     }
+
+    if (!KeyIso_load_public_key_by_compatibility(correlationId, key->keyCtx, isKeyP8Compatible,  pfxLength, pfxBytes, pkey, cert, ca)) {
+        KMPPPFXerr(KMPPPFX_F_LOAD, KMPPPFX_R_LOAD_PFX_PUBKEY_ERROR);
+        loc = "KeyIso_load_public_key_by_compatibility";
+        goto err;
+    }
+
+    KeyIso_add_key_to_keys_in_use(correlationId, key->keyCtx, *pkey);
 
     if (EVP_PKEY_id(*pkey) == EVP_PKEY_RSA ||
         EVP_PKEY_id(*pkey) == EVP_PKEY_RSA_PSS) {
@@ -650,12 +664,6 @@ static int kmpppfx_load(ENGINE *eng, const char *key_id,
         const RSA_METHOD *kmpppfx_rsa_method = ENGINE_get_RSA(eng);
         if (!kmpppfx_rsa_method) {
             KMPPPFXerr(KMPPPFX_F_LOAD, KMPPPFX_R_CANT_GET_METHOD);
-            goto err;
-        }
-
-        ret = KeyIso_open_key_by_compatibility(correlationId, &key->keyCtx, pfxBytes, pfxLength, salt, isKeyP8Compatible, isServiceP8Compatible);
-        if (!ret) {
-            KMPPPFXerr(KMPPPFX_F_LOAD, KMPPPFX_R_PFX_OPEN_ERROR);
             goto err;
         }
 
@@ -687,12 +695,6 @@ static int kmpppfx_load(ENGINE *eng, const char *key_id,
             goto err;
         }
 
-        ret = KeyIso_open_key_by_compatibility(correlationId, &key->keyCtx, pfxBytes, pfxLength, salt, isKeyP8Compatible, isServiceP8Compatible);
-        if (!ret) {
-            KMPPPFXerr(KMPPPFX_F_LOAD, KMPPPFX_R_PFX_OPEN_ERROR);
-            goto err;
-        }
-
         EC_KEY_set_method(eckey, kmpppfx_eckey_method);
         EC_KEY_set_ex_data(eckey, eckey_kmpppfx_idx, key);
         if (!EVP_PKEY_set1_engine(*pkey, eng)) {// moving ownership to EVP_PKEY, engine ref count will be increased by one and will be decreased when client calls to EVP_PKEY_free
@@ -711,13 +713,13 @@ static int kmpppfx_load(ENGINE *eng, const char *key_id,
 end:
     if (ret == 1) {
         KEYISOP_trace_log(correlationId, KEYISOP_TRACELOG_VERBOSE_FLAG, title, "Complete");
-        KEYISOP_trace_log_and_metric_para(correlationId, 0, g_config.solutionType, title, "", 
+        KEYISOP_trace_log_and_metric_para(correlationId, 0, g_config.solutionType, g_keysinuse.isLibraryLoaded, title, "", 
             "key was successfully loaded. Key type: %d. isKeyP8Compatible: %d. isServiceP8Compatible: %d. isDefaultSolutionType: %d", 
             EVP_PKEY_id(*pkey), isKeyP8Compatible, isServiceP8Compatible, g_config.isDefaultSolutionType);
     }
 
     KeyIso_free(pfxBytes);
-    KeyIso_clear_free_string(salt);
+    KeyIso_clear_free_string(clientData);
     return ret;
 
 err:
@@ -843,7 +845,8 @@ static int kmpppfx_rsa_priv_dec(int flen, const unsigned char *from,
             from,
 	        RSA_size(rsa),
             to,
-            padding);
+            padding,
+            0);
     } else {
         const RSA_METHOD *ossl_rsa_meth = RSA_get_default_method();
         PFN_RSA_meth_priv_dec pfn_rsa_meth_priv_dec = RSA_meth_get_priv_dec(ossl_rsa_meth);

@@ -24,6 +24,15 @@ int KeyIso_CLIENT_import_symmetric_key(
     unsigned int *outKeyLength,
     unsigned char **outKeyBytes);       // KeyIso_free()
 
+int KeyIso_CLIENT_import_symmetric_key_new(
+    const uuid_t correlationId,
+    const int inKeyLength,
+    const unsigned char *inKeyBytes,
+    const unsigned char *inImportKeyId, // Unique identifier to the imported key
+    unsigned int *outKeyLength,
+    unsigned char **outKeyBytes,       // KeyIso_free()
+    char **outClientData);             // KeyIso_free()
+
 int KeyIso_CLIENT_symmetric_key_encrypt_decrypt(
     KEYISO_KEY_CTX *keyCtx,
     const int mode,

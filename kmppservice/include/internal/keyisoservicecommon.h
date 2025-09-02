@@ -13,6 +13,8 @@ extern "C" {
 #include <stdint.h>
 #include <stdbool.h>
 
+#include "keyisocommon.h"
+
 #define KEYISO_SECRET_KEY_LENGTH   32
 #define KEYISO_SECRET_FILE_LENGTH  (KEYISO_SECRET_SALT_LENGTH + KEYISO_SECRET_KEY_LENGTH)
 
@@ -25,8 +27,10 @@ extern "C" {
 #define KEYISO_AES_PADDING_NONE    1
 
 #define KEYISO_KEY_DEFAULT_HASH_SIZE 30 // The default number of keys that the in-memory cache can hold opened at the same time
+#define KMPP_DEFAULT_ROTATION_INTERVAL_DAYS 90 // Default secret rotation interval in days
 
 extern bool g_isSaltValidationRequired;
+extern KeyIsoSolutionType g_isolationSolutionType;
 
 typedef int (*PFN_rsa_operation) (const uuid_t correlationId, void *pkey, 
                                     int flen, const unsigned char *from, 
@@ -35,6 +39,21 @@ typedef int (*PFN_rsa_operation) (const uuid_t correlationId, void *pkey,
 typedef int (*PFN_ecc_operation) (const uuid_t correlationId, void *pkey, int type,
                                     const unsigned char *dgst, int dlen, 
                                     unsigned char *sig, unsigned int siglen, unsigned int *outlen);
+
+typedef struct keyiso_encrypted_private_key_st KEYISO_ENCRYPTED_PRIV_KEY_ST;
+struct keyiso_encrypted_private_key_st {
+    uint32_t algVersion;
+    uint32_t secretSaltLen;
+    uint32_t ivLen;
+    uint32_t hmacLen;
+    uint32_t encKeyLen;
+    uint32_t secretIdLen; //Stores the machine secret guid length for process based isolation and extra salt length in TA
+    uint8_t  encryptedKeyBytes[];
+};
+
+int KeyIso_get_enc_key_bytes_len(
+    const KEYISO_ENCRYPTED_PRIV_KEY_ST *encKeySt,
+    uint32_t *outLen);
 
 
 int KeyIso_is_valid_salt_prefix(
@@ -45,7 +64,7 @@ int KeyIso_is_valid_salt_prefix(
 int KeyIso_is_valid_salt(
     const uuid_t correlationId,
     const char *salt,
-    unsigned char* secret);
+    const unsigned char* secret);
 
 int KeyIso_generate_salt_bytes(
     const uuid_t correlationId,
@@ -95,14 +114,18 @@ size_t KeyIso_msg_in_length(
     const PFN_mem_move memMove);
 
 ///////////////////////////////////////////////////////////////////////////////////////
-// The machine secret should be retrievd differently in different isolation solutions
+// The current valid secret is calculated differently in different isolation solutions
 // Defined here the function signature for the machine secret retrieval
 //////////////////////////////////////////////////////////////////////////////////////
-typedef int (*KeyIso_get_machine_secret_func_ptr)(uint8_t*, uint16_t);
+typedef int (*KeyIso_get_current_valid_secret_func_ptr)(const uuid_t, uint32_t*, uint8_t*, uint32_t*, uint8_t**);
+typedef int (*KeyIso_get_secret_by_id_func_ptr)(const uuid_t, uint32_t, const uint8_t*, uint32_t*, uint8_t **);
+typedef const uint8_t *(*KeyIso_get_legacy_machine_secret_func_ptr)(void);
 
-int KeyIso_set_machine_secret_method(
-    const uuid_t correlationId,
-    KeyIso_get_machine_secret_func_ptr getMachineSecretFunc);
+int KeyIso_set_secret_methods(
+    KeyIso_get_current_valid_secret_func_ptr getCurrentValidSecretFunc,
+    KeyIso_get_secret_by_id_func_ptr getSecretByIdFunc,
+    KeyIso_get_legacy_machine_secret_func_ptr getLegacyMachineSecretFunc);
+
 
 #ifdef  __cplusplus
 }

@@ -113,10 +113,11 @@ void KeyIso_SERVER_pfx_free(
 int KeyIso_is_valid_salt(
     const uuid_t correlationId,
     const char *salt,
-    unsigned char* secret);
+    const unsigned char* secret);
 
 char *KeyIso_get_pfx_secret_filename();
 
+// Legacy function to create(or read) a PFX secret file
 int KeyIsoP_create_pfx_secret(
     const uuid_t correlationId);
 

@@ -12,6 +12,7 @@
 #include "keyisocommon.h"
 #include "keyisomemory.h"
 #include "keyisolog.h"
+#include "keyisomachinesecretrotation.h"
 #include "keyisoservicekey.h"
 #include "keyisoservicecrypto.h"
 #include "keyisoserviceapi.h"
@@ -19,8 +20,8 @@
 
 #define SYMMETRIC_KEY_DEFAULT_ITER    100000
 
-extern KeyIso_get_machine_secret_func_ptr KeyIso_get_machine_secret_func;
 bool g_isSaltValidationRequired;
+extern KeyIso_get_legacy_machine_secret_func_ptr KeyIso_get_legacy_machine_secret_func;
 
 /////////////////////////////////////////////////////
 ///////////// Internal utility methods //////////////
@@ -270,11 +271,6 @@ static int _split_symmetric_key_encrypted_input(
     unsigned char* dataBytes = NULL;
     unsigned int dataBytesLength = 0;
 
-    if (inDataBytesLength < KMPP_SYMMETRICKEY_BLOB_LEN) {
-        KEYISOP_trace_log_error(correlationId, 0, title, "dataBytes split", "inDataBytesLength is smaller from meta data length");
-        return STATUS_FAILED;
-    }
-
     // Copy to the output versions HMAC and IVs according to the offset in the key bytes
     // encrypted data byte format - <version><SVN><HMAC result><IV><aes_256_cbc_ciphertext of the key>
     KeyIso_copy_data_src_offset(outVersion, inDataBytes, 1, &offset);
@@ -325,33 +321,31 @@ int KeyIso_symcrypt_kdf_generate_key_symmetrickey(
 {
     const char *title = KEYISOP_GEN_KEY_TITLE;
     unsigned char password[KEYISO_SECRET_KEY_LENGTH];
-    uint8_t machine_secret[KEYISO_SECRET_FILE_LENGTH] = { };
 
-    if(!KeyIso_get_machine_secret_func){
-        KEYISOP_trace_log_error(correlationId, 0, title, NULL, "machine secret retrieval function not set");
+    if(!KeyIso_get_legacy_machine_secret_func) {
+        KEYISOP_trace_log_error(correlationId, 0, title, NULL, "Legacy machine secret function not set");
         return STATUS_FAILED;
     }
 
-    if (KeyIso_get_machine_secret_func(machine_secret, sizeof(machine_secret)) != STATUS_OK) {
+    // Retrieve the legacy machine secret
+    const uint8_t *machineSecret = KeyIso_get_legacy_machine_secret_func();
+    if (machineSecret == NULL) {
         KEYISOP_trace_log_error(correlationId, 0, title, NULL, "Failed to get machine secret");
         return STATUS_FAILED;
     }
     
-    memcpy(password, machine_secret + KEYISO_SECRET_SALT_LENGTH, KEYISO_SECRET_KEY_LENGTH);
+    
+    memcpy(password, machineSecret + KEYISO_SECRET_SALT_LENGTH, KEYISO_SECRET_KEY_LENGTH);
     
     if (g_isSaltValidationRequired &&
         KeyIso_is_valid_salt_prefix(
             correlationId,
             salt,
-            machine_secret) == STATUS_FAILED) {
+            machineSecret) == STATUS_FAILED) {
                 KEYISOP_trace_log_error(correlationId, 0, title, NULL, "Invalid salt");
                 KeyIso_cleanse(password, KEYISO_SECRET_KEY_LENGTH);  
-                KeyIso_cleanse(machine_secret, sizeof(machine_secret));
                 return STATUS_FAILED;    
     }
-
-    // Cleanse machine secret after use
-    KeyIso_cleanse(machine_secret, sizeof(machine_secret));
 
     // Derive two keys from the decrypted key - for encrypt and HMAC
     if (KeyIso_symcrypt_kdf_generate_keys(
@@ -563,6 +557,11 @@ int KeyIso_symmetric_open_encrypted_data(
     unsigned char **outBytes)  // KeyIso_free()
 {
     const char *title = KEYISOP_IMPORT_SYMMETRIC_KEY_TITLE;
+    if (inBytes == NULL || inLength < KMPP_SYMMETRICKEY_BLOB_LEN) {
+        KEYISOP_trace_log_error(correlationId, 0, title, NULL, "Invalid input");
+        return STATUS_FAILED;
+    }
+
     unsigned char version;
     unsigned char securityVersion;
     unsigned char iv[KMPP_AES_BLOCK_SIZE];
@@ -630,6 +629,10 @@ int KeyIso_symmetric_open_encrypted_key(
     unsigned int *outKeyLength,
     unsigned char **outKeyBytes)
 {
+    if (inKeyBytes == NULL || inKeyLength < KMPP_SYMMETRICKEY_META_DATA_LEN + KMPP_SYMMETRICKEY_BLOB_LEN) {
+        return _cleanup_symmetric_open_encrypted_key(correlationId, STATUS_FAILED, NULL, "Invalid input");
+    }
+
     unsigned char encryptKey[KMPP_AES_256_KEY_SIZE];
     unsigned char hmacKey[KMPP_HMAC_SHA256_KEY_SIZE];
     unsigned char version;

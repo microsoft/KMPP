@@ -22,8 +22,8 @@ User=@KMPP_USER_NAME@
 PermissionsStartOnly=true
 ExecStartPre=/bin/bash -c "mkdir -p @KMPP_ROOT_DIR@{,/certs,/disallowed}"
 ExecStartPre=/bin/bash -c "mkdir -p @KMPP_PRIVATE_ROOT_DIR@{,/private}"
-ExecStartPre=/bin/bash -c "chown @KMPP_USER_NAME@:@KMPP_USER_NAME@ @KMPP_ROOT_DIR@{,/certs,/disallowed}"
-ExecStartPre=/bin/bash -c "chown @KMPP_USER_NAME@:@KMPP_USER_NAME@ @KMPP_PRIVATE_ROOT_DIR@{,/private}"
+ExecStartPre=/bin/bash -c "chown -R @KMPP_USER_NAME@:@KMPP_USER_NAME@ @KMPP_ROOT_DIR@{,/certs,/disallowed}"
+ExecStartPre=/bin/bash -c "chown -R @KMPP_USER_NAME@:@KMPP_USER_NAME@ @KMPP_PRIVATE_ROOT_DIR@{,/private}"
 ExecStartPre=/bin/bash -c "chmod 0755 @KMPP_ROOT_DIR@{,/certs,/disallowed}"
 ExecStartPre=/bin/bash -c "chmod 0700 @KMPP_PRIVATE_ROOT_DIR@{,/private}"
 
@@ -36,6 +36,9 @@ ExecStartPre=/bin/bash -c "chmod 0700 @KMPP_PRIVATE_ROOT_DIR@{,/private}"
 
 # To set key hash capacity (Number of opened keys opened at the same time)
 # ExecStart=/usr/bin/kmppservice "-keyCacheCapacity=30"
+
+# To set machine secret rotation interval in days (between 1 and 90)
+# ExecStart=/usr/bin/kmppservice "-secretRotationDays=90"
 
 # We may want to write log files to /tmp. Want to remain after service exits.
 # PrivateTmp=yes

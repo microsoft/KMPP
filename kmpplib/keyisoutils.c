@@ -3,6 +3,7 @@
  * Licensed under the MIT License
  */
 
+#include <limits.h>
 #include <stddef.h>
 #include <string.h>
 #include <ctype.h>
@@ -11,6 +12,7 @@
 #ifdef KMPP_OPENSSL_SUPPORT
 #include <openssl/err.h>
 #include <openssl/rand.h>
+#include <openssl/bn.h>
 #else
 #include "kmppsymcryptwrapper.h"
 #endif //KMPP_OPENSSL_SUPPORT
@@ -22,6 +24,7 @@
 #include "keyisoutils.h"
 #include "keyisoipccommands.h"
 
+#define IS_LITTLE_ENDIAN (((const union { uint32_t i; uint8_t c[4]; }){ 1 }).c[0] == 1)
 
 // InProc is off by default.
 int KEYISOP_inProc = 0;
@@ -146,11 +149,19 @@ void KeyIsoP_set_default_dir(
     if (defaultCertArea && *defaultCertArea) {
         KeyIso_free(KEYISOP_defaultCertArea);
         KEYISOP_defaultCertArea = KeyIso_strndup(defaultCertArea, KEYISO_MAX_FILE_NAME);
+    } else {
+        // Clear
+        KeyIso_free(KEYISOP_defaultCertArea);
+        KEYISOP_defaultCertArea = NULL;
     }
 
     if (defaultCertDir && *defaultCertDir) {
         KeyIso_free(KEYISOP_defaultCertDir);
         KEYISOP_defaultCertDir = KeyIso_strndup(defaultCertDir, KEYISO_MAX_PATH_LEN); // NULL terminator is included in KEYISO_MAX_PATH_LEN
+    } else {
+        // Clear
+        KeyIso_free(KEYISOP_defaultCertDir);
+        KEYISOP_defaultCertDir = NULL;
     }
 }
 
@@ -184,12 +195,10 @@ char *KeyIsoP_get_path_name(
     size_t subPathLength = strlen(subPath);
     size_t pathNameLength = dirLength + 1 + subPathLength + 1;
     char *pathName = (char *) KeyIso_zalloc(pathNameLength);
-
-    if (pathName != NULL) {
-        snprintf(pathName, pathNameLength, "%s/%s",
-            dir, subPath);
+    if (pathName == NULL) {
+        return NULL; // Memory allocation failed
     }
-
+    snprintf(pathName, pathNameLength, "%s/%s", dir, subPath);
     return pathName;
 }
 
@@ -229,83 +238,121 @@ void KeyIsoP_set_execute_flags(
 // Key structure helper functions
 //
 
-size_t KeyIso_get_rsa_pkey_bytes_len(const KEYISO_RSA_PKEY_ST *rsaPkeySt)
+int KeyIso_get_rsa_pkey_bytes_len(const KEYISO_RSA_PKEY_ST *rsaPkeySt, uint32_t *outLen)
 {
-    if(rsaPkeySt){
-        return 
-            rsaPkeySt->rsaModulusLen   +   // n
-            rsaPkeySt->rsaPublicExpLen +   // e
-            rsaPkeySt->rsaPrimes1Len   +   // p
-            rsaPkeySt->rsaPrimes2Len;      // q
+    const char *title = KEYISOP_RSA_PKEY_ENC_DEC_TITE;
+    if (outLen == NULL || rsaPkeySt == NULL) {
+        KEYISOP_trace_log_error(NULL, 0, title, "KeyIso_get_rsa_pkey_bytes_len", "Invalid outLen");
+        return STATUS_FAILED;
     }
-    return 0;
+    
+    uint32_t totalLen = 0;
+    if (KEYISO_ADD_OVERFLOW(rsaPkeySt->rsaModulusLen, rsaPkeySt->rsaPublicExpLen, &totalLen) ||  // n + e
+        KEYISO_ADD_OVERFLOW(totalLen, rsaPkeySt->rsaPrimes1Len, &totalLen) || // + p
+        KEYISO_ADD_OVERFLOW(totalLen, rsaPkeySt->rsaPrimes2Len, &totalLen)) {  // + q
+        KEYISOP_trace_log_error(NULL, 0, title, "KeyIso_get_rsa_pkey_bytes_len", "Addition overflow");
+        return STATUS_FAILED;
+    }
+    
+    *outLen = totalLen;
+    return STATUS_OK;
 }
 
-size_t KeyIso_get_ec_pkey_bytes_len(const KEYISO_EC_PKEY_ST *ecPkeySt)
+int KeyIso_get_ec_pkey_bytes_len(const KEYISO_EC_PKEY_ST *ecPkeySt, uint32_t *outLen)
 {
+    const char *title = KEYISOP_ECDSA_PKEY_SIGN_TITLE;
+    if (outLen == NULL || ecPkeySt == NULL) {
+        KEYISOP_trace_log_error(NULL, 0, title, "KeyIso_get_ec_pkey_bytes_len", "Invalid outLen");
+        return STATUS_FAILED;
+    }
+    
     // EC private key dynamic len
-    if(ecPkeySt){
-        return 
-            ecPkeySt->ecPubXLen      +   // x
-            ecPkeySt->ecPubYLen      +   // y
-            ecPkeySt->ecPrivKeyLen;      // d (private key)
+    uint32_t totalLen = 0;
+    if (KEYISO_ADD_OVERFLOW(ecPkeySt->ecPubXLen, ecPkeySt->ecPubYLen, &totalLen) ||  // x + y
+        KEYISO_ADD_OVERFLOW(totalLen, ecPkeySt->ecPrivKeyLen, &totalLen)) {  // + d (private key)
+        KEYISOP_trace_log_error(NULL, 0, title, "KeyIso_get_ec_pkey_bytes_len", "Addition overflow");
+        return STATUS_FAILED;
     }
-    return 0;
+
+    *outLen = totalLen;
+    return STATUS_OK;
 }
 
-size_t KeyIso_get_enc_key_bytes_len(const uuid_t correlationId, uint32_t saltLen, uint32_t ivLen, uint32_t hmacLen, uint32_t encKeyLen)
+int KeyIso_get_enc_key_bytes_len_params(const uuid_t correlationId, uint32_t secretSaltLen, uint32_t ivLen, uint32_t hmacLen, uint32_t encKeyLen, uint32_t secretIdLen, uint32_t *outLen)
 {
-    size_t totalLen = 0;
-    if (KEYISO_ADD_OVERFLOW(saltLen, ivLen, &totalLen) ||
+    const char *title = KEYISOP_ENC_KEY_TITLE;
+    if (outLen == NULL) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "KeyIso_get_enc_key_bytes_len_params", "Invalid outLen");
+        return STATUS_FAILED;
+    }
+    *outLen = 0;
+    
+    uint32_t totalLen = 0;
+    if (KEYISO_ADD_OVERFLOW(secretSaltLen, ivLen, &totalLen) ||
         KEYISO_ADD_OVERFLOW(totalLen, hmacLen, &totalLen) ||
-        KEYISO_ADD_OVERFLOW(totalLen, encKeyLen, &totalLen)) {
-            KEYISOP_trace_log_error(correlationId, 0, KEYISOP_OPEN_KEY_TITLE, "KeyIso_get_enc_key_bytes_len", "Addition overflow");
-            return 0;
-        }
-    
-    return totalLen;
-}
-
-size_t KeyIso_get_rsa_enc_dec_with_attached_key_in_dynamic_bytes_len(const uuid_t correlationId, uint32_t saltLen, uint32_t ivLen, uint32_t hmacLen, uint32_t encKeyLen, uint32_t fromBytesLen, uint32_t labelLen)
-{
-    size_t dynamicLen = 0;
-    size_t encDecParamDynamicLen = KeyIso_get_rsa_enc_dec_params_dynamic_len(fromBytesLen, labelLen);
-    size_t encKeyDynamicLen = KeyIso_get_enc_key_bytes_len(correlationId, saltLen, ivLen, hmacLen, encKeyLen);
-
-    if (KEYISO_ADD_OVERFLOW(encDecParamDynamicLen, encKeyDynamicLen, &dynamicLen)) {
-        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_RSA_PKEY_ENC_DEC_TITE, "KeyIso_get_rsa_enc_dec_with_attached_key_in_dynamic_bytes_len", "Addition with enc key overflow");
-        return 0;
+        KEYISO_ADD_OVERFLOW(totalLen, encKeyLen, &totalLen) || 
+        KEYISO_ADD_OVERFLOW(totalLen, secretIdLen, &totalLen)) {
+            KEYISOP_trace_log_error(correlationId, 0, title, "KeyIso_get_enc_key_bytes_len", "Addition overflow");
+            return STATUS_FAILED;
     }
     
-    return dynamicLen;
+    *outLen = totalLen;
+    return STATUS_OK;
 }
 
-size_t KeyIso_get_ecdsa_sign_with_attached_key_in_dynamic_bytes_len(const uuid_t correlationId, uint32_t saltLen, uint32_t ivLen, uint32_t hmacLen, uint32_t encKeyLen, uint32_t digestLen)
+int KeyIso_get_rsa_enc_dec_with_attached_key_in_dynamic_bytes_len(const uuid_t correlationId, uint32_t publicKeyLen, uint32_t opaqueEncKeyLen, uint32_t fromBytesLen, uint32_t labelLen, uint32_t *outLen)
 {
-    size_t dynamicLen = 0;
-    size_t encKeyDynamicLen = KeyIso_get_enc_key_bytes_len(correlationId, saltLen, ivLen, hmacLen, encKeyLen);
-    if (KEYISO_ADD_OVERFLOW(encKeyDynamicLen, digestLen, &dynamicLen)) {
-        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_ECDSA_PKEY_SIGN_TITLE, "KeyIso_get_ecdsa_sign_with_attached_key_in_dynamic_bytes_len", "Addition overflow");
-        return 0;
+    const char *title = KEYISOP_RSA_PKEY_ENC_DEC_TITE;
+    if (outLen == NULL) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "KeyIso_get_rsa_enc_dec_with_attached_key_in_dynamic_bytes_len", "Invalid outLen");
+        return STATUS_FAILED;
+    }
+
+    uint32_t dynamicLen = 0;
+    if (KEYISO_ADD_OVERFLOW(publicKeyLen, opaqueEncKeyLen, &dynamicLen) ||
+        KEYISO_ADD_OVERFLOW(dynamicLen, fromBytesLen, &dynamicLen) || 
+        KEYISO_ADD_OVERFLOW(dynamicLen, labelLen, &dynamicLen)) {
+            KEYISOP_trace_log_error(correlationId, 0, title, "KeyIso_get_rsa_enc_dec_with_attached_key_in_dynamic_bytes_len", "Addition overflow");
+            return STATUS_FAILED;
+    }
+    *outLen = dynamicLen;
+    return STATUS_OK;
+}
+
+int KeyIso_get_ecdsa_sign_with_attached_key_in_dynamic_bytes_len(const uuid_t correlationId, uint32_t publicKeyLen, uint32_t opaqueEncKeyLen, uint32_t digestLen, uint32_t *outLen)
+{
+    const char *title = KEYISOP_ECDSA_PKEY_SIGN_TITLE;
+    if (outLen == NULL) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "KeyIso_get_ecdsa_sign_with_attached_key_in_dynamic_bytes_len", "Invalid outLen");
+        return STATUS_FAILED;
+    }
+
+    uint32_t dynamicLen = 0;
+    if (KEYISO_ADD_OVERFLOW(publicKeyLen, opaqueEncKeyLen, &dynamicLen) ||
+        KEYISO_ADD_OVERFLOW(dynamicLen, digestLen, &dynamicLen)) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "KeyIso_get_ecdsa_sign_with_attached_key_in_dynamic_bytes_len", "Addition with enc key overflow");
+        return STATUS_FAILED;
     }
     
-    return dynamicLen;
+    *outLen = dynamicLen;
+    return STATUS_OK;
 }
 
-size_t KeyIso_get_rsa_enc_dec_params_dynamic_len(uint32_t fromBytesLen, uint32_t labelLen)
+int KeyIso_get_rsa_enc_dec_params_dynamic_len(uint32_t fromBytesLen, uint32_t labelLen, uint32_t *outLen)
 {
+    const char *title = KEYISOP_RSA_PKEY_ENC_DEC_TITE;
+    if (outLen == NULL) {
+        KEYISOP_trace_log_error(NULL, 0, title, "KeyIso_get_rsa_enc_dec_params_dynamic_len", "Invalid outLen");
+        return STATUS_FAILED;
+    }
     uint32_t totalLen = 0;
     if (KEYISO_ADD_OVERFLOW(fromBytesLen, labelLen, &totalLen)) {
-        KEYISOP_trace_log_error(NULL, 0, KEYISOP_ENGINE_TITLE, "Invalid format", "Invalid total length");
-        return 0;
+        KEYISOP_trace_log_error(NULL, 0, title, "Invalid format", "Invalid total length");
+        return STATUS_FAILED;
     }
 
-    if (totalLen  == 0) {
-        KEYISOP_trace_log_error(NULL, 0, KEYISOP_ENGINE_TITLE, "Invalid format", "Invalid total length");
-        return 0;
-    }
-
-    return (size_t)totalLen;
+    *outLen = totalLen;
+    return STATUS_OK;
 }
 
 void KeyIso_fill_rsa_enc_dec_param(
@@ -322,7 +369,11 @@ void KeyIso_fill_rsa_enc_dec_param(
     params->tlen = tlen;
     params->fromBytesLen = flen;
     params->labelLen = labelLen;
-    size_t dynamicLen = KeyIso_get_rsa_enc_dec_params_dynamic_len(flen, labelLen);
+    uint32_t dynamicLen = 0;
+    if (KeyIso_get_rsa_enc_dec_params_dynamic_len(flen, labelLen, &dynamicLen) != STATUS_OK) {
+        KEYISOP_trace_log_error(NULL, 0, KEYISOP_RSA_PKEY_ENC_DEC_TITE, "KeyIso_fill_rsa_enc_dec_param", "Failed to get dynamic length");
+        return;
+    }
     if (dynamicLen == 0 || bytes == NULL) {
         return;
     }
@@ -358,162 +409,319 @@ int KeyIso_symmetric_key_encrypt_decrypt_size(
     return STATUS_OK;
 }
 
-static bool _is_valid_extra_data_header(
+static bool _is_valid_metadata_header(
     const uuid_t correlationId,
     KeyIsoSolutionType expectedSolutionType,
-    KEYISO_ENCRYPTION_EXTRA_DATA_HEADER_ST* header)
+    KEYISO_CLIENT_METADATA_HEADER_ST clientDataHeader)
 {
     const char *title = KEYISOP_HELPER_PFX_TITLE;
 
-    if (header->version < KEYISOP_PKCS8_MIN_VERSION) {
-        KEYISOP_trace_log_error_para(correlationId, 0, title, NULL, "Invalid version", "version: %hu,  min version that supports extra data: %u", header->version, KEYISOP_PKCS8_MIN_VERSION);
+    if (clientDataHeader.version < KEYISOP_PKCS8_MIN_VERSION) {
+        KEYISOP_trace_log_error_para(correlationId, 0, title, NULL, "Invalid version", "version: %d, expected: %d", clientDataHeader.version, KEYISOP_PKCS8_MIN_VERSION);
         return false;
     }
 
-    if (header->solutionType != expectedSolutionType) {
-        KEYISOP_trace_log_error_para(correlationId, 0, title, NULL, "The key is encrypted by a different isolation solution then is currently selected by config", 
-                                     "key type: %d, expected type: %d", header->solutionType, expectedSolutionType);
+    if (clientDataHeader.isolationSolution != expectedSolutionType) {
+        KEYISOP_trace_log_error_para(correlationId, 0, title, NULL, "The key is encrypted by a different isolation solution then is currently selected by config", "expected: %d, actual: %d", expectedSolutionType, clientDataHeader.isolationSolution);
         return false;
     }
 
     return true;
 }
 
-static int _get_salt_from_extra_data(
+static int _validate_keyid_metadata_header(
     const uuid_t correlationId,
-    uint32_t solutionType, 
-    uint32_t extraDataLength,
-    unsigned char *extraDataBuff,
-    char **outSalt)
+    const char* clientData,  // Base64 encoded client data
+    KeyIsoSolutionType expectedSolutionType)
 {
     const char *title = KEYISOP_HELPER_PFX_TITLE;
-    int ret = STATUS_FAILED;
+    int status = STATUS_FAILED;
+    unsigned char* decodedData = NULL;
+    int decodedLength;
+    KEYISO_CLIENT_KEYID_HEADER_ST keyIdHeader;
 
-    // Read the extra data based on the solution type
-    switch (solutionType) {
-        case KeyIsoSolutionType_process:
-        case KeyIsoSolutionType_tz:
-        {
-            KEYISO_KMPP_SERVICE_EXTRA_DATA_ST* defaultSolutionExtraDataSt = (KEYISO_KMPP_SERVICE_EXTRA_DATA_ST*)KeyIso_zalloc(extraDataLength);
-            if (defaultSolutionExtraDataSt == NULL) {
-                // Allocation failed
-                return ret;
-            }
-            memcpy(defaultSolutionExtraDataSt, extraDataBuff, extraDataLength);
-            if (defaultSolutionExtraDataSt->saltLength == 0) {
-                KEYISOP_trace_log_error_para(correlationId, 0, title, "Invalid salt length", "salt cant be null for this isolation type", "isolation type: %d", defaultSolutionExtraDataSt->header.solutionType);
-                KeyIso_clear_free(defaultSolutionExtraDataSt, extraDataLength);
-                return ret;
-            }
-
-            if (defaultSolutionExtraDataSt->saltLength < KEYISO_SECRET_SALT_STR_BASE64_LEN) {
-                KEYISOP_trace_log_error_para(correlationId, 0, title, "Invalid salt length", "salt length is too small", "salt length: %d", defaultSolutionExtraDataSt->saltLength);
-                KeyIso_clear_free(defaultSolutionExtraDataSt, extraDataLength);
-                return ret;
-            }
-
-            char *salt = (char*) KeyIso_zalloc(defaultSolutionExtraDataSt->saltLength + 1);
-            if (salt == NULL) {
-                // Allocation failed
-                KeyIso_clear_free(defaultSolutionExtraDataSt, extraDataLength);
-                return ret;
-            }
-
-            memcpy(salt, &defaultSolutionExtraDataSt->salt, defaultSolutionExtraDataSt->saltLength);
-            salt[defaultSolutionExtraDataSt->saltLength] = '\0';
-            *outSalt = salt;
-            KeyIso_clear_free(defaultSolutionExtraDataSt, extraDataLength);
-            return STATUS_OK;
-        }
-        case KeyIsoSolutionType_tpm:
-        {
-            // No need for extra data for TPM , only header that defines the version and solution type
-            // TPM additional data that needed for opening the key is stored in the pkcs#8 
-            return STATUS_OK;
-
-        }
-        default:
-            KEYISOP_trace_log_error_para(correlationId, 0, title, "Invalid solutionType", "cant parse keyid", "solutionType: %d", solutionType);
-            return ret;
+    // Base64 decode the client data
+    decodedLength = KeyIso_base64_decode(correlationId, clientData, &decodedData);
+    if (decodedLength <= 0) {
+        KEYISOP_trace_log_error_para(correlationId, 0, title, "Base64 decode", "Failed or invalid decoded length", "length: %d", decodedLength);
+        return status;
     }
+
+    if ((size_t)decodedLength < sizeof(KEYISO_CLIENT_KEYID_HEADER_ST)) {
+        KEYISOP_trace_log_error_para(correlationId, 0, title, "Base64 decode", "Decoded data is too short", "length: %d, expected: %zu", decodedLength, sizeof(KEYISO_CLIENT_KEYID_HEADER_ST));
+        KeyIso_free(decodedData);
+        return status;
+    }
+
+    // Copy and validate the header
+    memcpy(&keyIdHeader, decodedData, sizeof(keyIdHeader));
+    if (!KeyIso_is_valid_keyid_header(correlationId, expectedSolutionType, &keyIdHeader)) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "Header validation", "Failed");
+        KeyIso_free(decodedData);
+        return status;
+    }
+
+    KeyIso_free(decodedData);
+    return STATUS_OK;
 }
 
-int KeyIso_get_salt_from_keyid(
+
+bool KeyIso_is_valid_keyid_header(
     const uuid_t correlationId,
     KeyIsoSolutionType expectedSolutionType,
-    const char *keyId, // Expects new version keyid format:  'n' <Base64 ExtraDataBuffer> ':' <Base64 PFX>
-    unsigned int encodedExtraDataLength,
-    char **outSalt) 
-{   
-    int ret = STATUS_FAILED;
-    const char *title = KEYISOP_HELPER_PFX_TITLE;
-    unsigned char *extraDataBuff = NULL;
-    char *encodedExtraData = NULL;
-
-    if (keyId[0] != VERSION_CHAR) {
-        KEYISOP_trace_log_error_para(correlationId, 0, title, "Invalid first byte", "Invalid version char", "char: %c", keyId[0]);
-        return ret;
+    const KEYISO_CLIENT_KEYID_HEADER_ST* keyidMetadata)
+{
+    if (keyidMetadata == NULL) {
+        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_HELPER_PFX_TITLE, "KeyIso_is_valid_keyid_header", "keyidMetadata is NULL");
+        return false;
     }
 
-    if (outSalt == NULL) {
-        KEYISOP_trace_log_error(correlationId, 0, title, "Invalid parameter", "outSalt ptr cant be null");
-        return ret;
+    if (keyidMetadata->clientVersion < KEYISOP_PKCS8_MIN_VERSION) {
+        KEYISOP_trace_log_error_para(correlationId, 0, KEYISOP_HELPER_PFX_TITLE, "Invalid client version", "version is too low", "version: %d, expected: %d", keyidMetadata->clientVersion, KEYISOP_PKCS8_MIN_VERSION);
+        return false;
+    }
+    
+    KEYISO_CLIENT_METADATA_HEADER_ST metadataHeader = {
+        .version = keyidMetadata->keyServiceVersion,
+        .isolationSolution = keyidMetadata->isolationSolution,
+    };
+    return _is_valid_metadata_header(correlationId, expectedSolutionType, metadataHeader);
+}
+
+const char *KeyIso_get_delimiter_ptr(const char *keyId)
+{
+    size_t keyIdLen = strnlen(keyId, KEYISO_MAX_KEY_ID_LEN);
+    size_t clientDataLimit = KeyIso_get_client_data_maximum(keyId);
+    size_t maxLengthToSearch = (clientDataLimit < keyIdLen) ? clientDataLimit : keyIdLen;
+
+    const char *pfxStartPtr = memchr(keyId, CLIENT_DATA_DELIMITER, maxLengthToSearch);
+    return pfxStartPtr;
+}
+
+
+char* KeyIso_get_base64_client_data(
+    const uuid_t correlationId, 
+    const char *title, 
+    const KEYISO_CLIENT_DATA_ST *clientDataSt)
+{
+    if (clientDataSt == NULL) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "clientDataSt", "clientDataSt is NULL");
+        return NULL;
     }
 
-    *outSalt = NULL;
-    encodedExtraData = (char *) KeyIso_zalloc(encodedExtraDataLength);
-    if (encodedExtraData == NULL) {
+    size_t dataSize = sizeof(KEYISO_CLIENT_DATA_ST) + clientDataSt->pubKeyLen;
+    unsigned char *clientData = (unsigned char*)KeyIso_zalloc(dataSize);
+    if (clientData == NULL) {
         // Allocation failed
-        return ret;
+        return NULL;
     }
+
+    memcpy(clientData, clientDataSt, dataSize);
+
+    char *base64ClientData = NULL;
+    int len = KeyIso_base64_encode(
+        correlationId,
+        clientData,
+        dataSize,
+        &base64ClientData);
     
-    memcpy(encodedExtraData, keyId + 1, encodedExtraDataLength - 1); // Skip the 'n' version byte and the ':' delimiter
-    encodedExtraData[encodedExtraDataLength - 1] = '\0';        
-    
-    size_t extraDataLength = KeyIso_base64_decode(correlationId, encodedExtraData, &extraDataBuff);
-    // Free buffer after decoding
-    KeyIso_clear_free(encodedExtraData, encodedExtraDataLength);
-    encodedExtraData = NULL;
-
-    if (extraDataBuff == NULL) {
-        KEYISOP_trace_log_error(correlationId, 0, title, "KeyIso_base64_decode failed", "decoded buffer is null");
-        return ret;
+    KeyIso_clear_free(clientData, dataSize);
+    if (base64ClientData == NULL || len <= 0) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "base64ClientData", "base64ClientData is NULL");
+        return NULL;
     }
 
-    // Check if the decoded data is long enough to contain the header
-    if (extraDataLength < sizeof(KEYISO_ENCRYPTION_EXTRA_DATA_HEADER_ST)) {
-        KEYISOP_trace_log_error_para(correlationId, 0, title, "Invalid decoded data length", "buffer too short", "extraDataLength: %d", extraDataLength);
-        KeyIso_clear_free(extraDataBuff, extraDataLength);
-        return ret;
-    }
-    
-    // Check alignment of the header
-    if ((uintptr_t)extraDataBuff % sizeof(KEYISO_ENCRYPTION_EXTRA_DATA_HEADER_ST) != 0) {
-        KEYISOP_trace_log_error(correlationId, 0, title, "Invalid decoded data alignment", "buffer not aligned to header size");
-        KeyIso_clear_free(extraDataBuff, extraDataLength);
-        return ret;
-    }
-    
-    KEYISO_ENCRYPTION_EXTRA_DATA_HEADER_ST header;
-    memset(&header, 0, sizeof(header));
+    return base64ClientData;
+}
 
-    // Read the header from the buffer
-    memcpy(&header, extraDataBuff, sizeof(KEYISO_ENCRYPTION_EXTRA_DATA_HEADER_ST));
-    if (!_is_valid_extra_data_header(correlationId, expectedSolutionType, &header)) {
-        KEYISOP_trace_log_error(correlationId, 0, title, "Invalid keyid", "invalid extradata header");
-        KeyIso_clear_free(extraDataBuff, extraDataLength);
-        return ret;
+int KeyIso_decode_and_validate_base64_client_data(
+    const uuid_t correlationId,
+    const char *clientDataStr,
+    KEYISO_CLIENT_DATA_ST **outDecodedClientData,
+    uint32_t *outClientDataLen)
+{
+    const char *title = KEYISOP_KEY_TITLE;
+
+    if (!clientDataStr || !outDecodedClientData || !outClientDataLen) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "Invalid input", "null parameter");
+        return STATUS_FAILED;
     }
 
-    ret = _get_salt_from_extra_data(correlationId, header.solutionType, extraDataLength, extraDataBuff, outSalt);
-    if (ret != STATUS_OK) {
-        KEYISOP_trace_log_error(correlationId, 0, title, "Invalid keyid", "cant parse keyid");
-        KeyIso_clear_free(extraDataBuff, extraDataLength);
-        return ret;
+    unsigned char *decodedClientData = NULL;
+    int decodedLen = KeyIso_base64_decode(correlationId, clientDataStr, &decodedClientData);
+    if (!decodedClientData || (size_t)decodedLen < sizeof(KEYISO_CLIENT_DATA_ST)) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "Base64 decode", "Failed or too short");
+        KeyIso_free(decodedClientData);
+        return STATUS_FAILED;
     }
 
-    KeyIso_clear_free(extraDataBuff, extraDataLength);
+    KEYISO_CLIENT_DATA_ST* clientDataSt = (KEYISO_CLIENT_DATA_ST *)KeyIso_zalloc(decodedLen);
+    if (!clientDataSt) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "Memory allocation", "Failed to allocate client data structure");
+        KeyIso_free(decodedClientData);
+        return STATUS_FAILED;
+    }
+    memcpy(clientDataSt, decodedClientData, decodedLen);
+    uint32_t pubKeyLen = clientDataSt->pubKeyLen;
+
+    // Validate pubKeyLen against maximum allowed size
+    if (pubKeyLen > KMPP_MAX_MESSAGE_SIZE) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "Invalid pubKeyLen", "exceeds max allowed");
+        KeyIso_free(decodedClientData);
+        KeyIso_free(clientDataSt);
+        return STATUS_FAILED;
+    }
+
+    // Validate total size including variable length array
+    size_t expectedSize = GET_DYNAMIC_STRUCT_SIZE(KEYISO_CLIENT_DATA_ST, pubKeyLen);
+    if ((size_t)decodedLen != expectedSize) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "Invalid total size", "mismatch with pubKeyLen");
+        KeyIso_free(decodedClientData);
+        KeyIso_free(clientDataSt);
+        return STATUS_FAILED;
+    }
+
+    if (expectedSize > UINT32_MAX) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "Invalid size", "exceeds UINT32_MAX");
+        KeyIso_free(decodedClientData);
+        KeyIso_free(clientDataSt);
+        return STATUS_FAILED;
+    }
+
+    *outDecodedClientData = clientDataSt;
+    *outClientDataLen = (uint32_t)decodedLen;
+    KeyIso_free(decodedClientData);
     return STATUS_OK;
+}
+
+static int _cleanup_get_client_data(
+    const uuid_t correlationId, 
+    int ret, 
+    const char* message, 
+    KEYISO_CLIENT_DATA_ST* decodedClientData, 
+    KEYISO_CLIENT_DATA_ST* clientDataSt) 
+{
+    if (ret != STATUS_OK) {
+        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_KEY_TITLE, message, "");
+        KeyIso_free(clientDataSt);
+    }
+    KeyIso_free(decodedClientData);
+    return ret;
+}
+
+int KeyIso_get_client_data_from_key_bytes(
+    const uuid_t correlationId, 
+    const char *clientDataStr,
+    KEYISO_CLIENT_DATA_ST **outClientData) 
+{
+    if (!clientDataStr || !outClientData) {
+        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_KEY_TITLE, "Invalid input", "null parameter");
+        return STATUS_FAILED;
+    }
+
+    KEYISO_CLIENT_DATA_ST *decodedClientData = NULL;
+    uint32_t decodedLen = 0;
+
+    if (KeyIso_decode_and_validate_base64_client_data(correlationId, clientDataStr, &decodedClientData, &decodedLen) != STATUS_OK) {
+        return _cleanup_get_client_data(correlationId, STATUS_FAILED, "Failed to decode or validate client data", decodedClientData, NULL);
+    }
+
+    KEYISO_CLIENT_DATA_ST *clientDataSt = NULL;
+    clientDataSt = (KEYISO_CLIENT_DATA_ST *)KeyIso_zalloc(decodedLen);
+    if (!clientDataSt) {
+        return _cleanup_get_client_data(correlationId, STATUS_FAILED, "Memory allocation failed", decodedClientData, NULL);
+    }
+
+    memcpy(clientDataSt, decodedClientData, decodedLen);
+    *outClientData = clientDataSt;
+
+    return _cleanup_get_client_data(correlationId, STATUS_OK, NULL, decodedClientData, NULL);
+}
+
+// Function to clean up resources before returning
+static int _cleanup_get_client_data_from_keyid(
+    int res, 
+    char *encodedClientData, 
+    unsigned char *decodedData, 
+    int decodedDataLength)
+{
+    KeyIso_clear_free(decodedData, decodedDataLength);  // Secure clear for sensitive data
+    if (res != STATUS_OK) {
+        KeyIso_free(encodedClientData);
+    }
+    return res;
+}
+
+// Is used from gdbus service to support KMPP key from when the client is MScrypt
+int KeyIso_get_client_data_from_keyid(
+    const uuid_t correlationId,
+    KeyIsoSolutionType expectedSolutionType,
+    const char *keyId,  // Expects new version keyid format:  'n' <Base64 ExtraDataBuffer> ':' <Base64 PFX>
+    char **clientData)  // Base64 encoded client data after the header is validated
+{   
+    const char *title = KEYISOP_HELPER_PFX_TITLE;
+    char *encodedClientData = NULL;
+    unsigned char *decodedData = NULL;
+    int decodedDataLength = 0;
+    int encodedClientDataLength = 0;
+        
+    // Validate inputs
+    if (keyId == NULL) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "Invalid parameter", "keyId cannot be null");
+        return STATUS_FAILED;
+    }
+    
+    if (keyId[0] != VERSION_CHAR) {
+        KEYISOP_trace_log_error_para(correlationId, 0, title, "Invalid first byte", 
+            "Invalid version char", "char: %c", keyId[0]);
+        return STATUS_FAILED;
+    }
+
+    if (clientData == NULL) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "Invalid parameter", "clientData ptr cannot be null");
+        return STATUS_FAILED;
+    }
+    
+    *clientData = NULL;
+
+    // Find delimiter between client data and PFX bytes
+    const char* delimiterPtr = KeyIso_get_delimiter_ptr(keyId);
+    if (delimiterPtr == NULL) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "Invalid format",  "No delimiter found in keyId");
+        return STATUS_FAILED;
+    }
+    
+    // Calculate the encoded client data length (exclude version char and ensure not too long)
+    encodedClientDataLength = (int)(delimiterPtr - keyId - 1);
+    if (encodedClientDataLength <= 0 || encodedClientDataLength >= MAX_CLIENT_DATA_BASE64_LENGTH) {
+        KEYISOP_trace_log_error_para(correlationId, 0, title, "Invalid parameter", "encodedClientDataLength is invalid", "length: %d", encodedClientDataLength);
+        return STATUS_FAILED;
+    }
+
+    // Allocate and copy the encoded client data
+    encodedClientData = (char *)KeyIso_zalloc(encodedClientDataLength + 1);
+    if (encodedClientData == NULL) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "Memory allocation", "Failed to allocate memory for encodedClientData");
+        return STATUS_FAILED;
+    }
+    
+    // Copy the encoded client data (skip version char)
+    memcpy(encodedClientData, keyId + 1, encodedClientDataLength);
+    encodedClientData[encodedClientDataLength] = '\0';
+
+    int res = _validate_keyid_metadata_header(correlationId, encodedClientData, expectedSolutionType);
+    if (res != STATUS_OK) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "Header validation", "Failed");
+        KeyIso_free(encodedClientData);
+        return res;
+    }
+
+    // Allocate memory for client data output
+    *clientData = encodedClientData;
+    
+    // Clean up resources and return
+    return _cleanup_get_client_data_from_keyid(res, encodedClientData, decodedData, decodedDataLength);
+    
 }
 
 /////////////////////////////////////////////////////////////////
@@ -558,10 +766,12 @@ Return Values:
         '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '+', '/'
     };
 
-    uint32_t  ib;
-    uint32_t  ich;
-    uint32_t  cchEncoded;
-    uint8_t    b0, b1, b2;
+    uint32_t   ib = 0;
+    uint32_t   ich = 0;
+    uint32_t   cchEncoded = 0;
+    uint8_t    b0 = 0;
+    uint8_t    b1 = 0;
+    uint8_t    b2 = 0;
     uint8_t *  pbDecodedBuffer = (uint8_t *) pDecodedBuffer;
     const char *title = "BASE64_ENCODE";
 
@@ -583,7 +793,6 @@ Return Values:
     }
 
     // Encode data byte triplets into four-byte clusters.
-    ib = ich = 0;
     while (ib < cbDecodedBufferSize) {
         b0 = pbDecodedBuffer[ib++];
         b1 = (ib < cbDecodedBufferSize) ? pbDecodedBuffer[ib++] : 0;
@@ -755,12 +964,14 @@ int KeyIso_base64_encode(
         KEYISOP_trace_log_error_para(correlationId, 0, title, "KeyIso_base64_encode", "base64encode failed",
             "length: %d expected: %d", encodeLength, base64Length);
         KeyIso_free(*str);
+        *str = NULL;
         return res;
     }
     if (encodeLength != base64Length) {
         KEYISOP_trace_log_error_para(correlationId, 0, title, "KeyIso_base64_encode", "Invalid encode length",
             "length: %d expected: %d", encodeLength, base64Length);
         KeyIso_free(*str);
+        *str = NULL;
         return res;
     }
 
@@ -883,3 +1094,21 @@ int KeyIso_retrieve_evp_pkey_sign_data( const uuid_t correlationId, const char* 
     }
     return STATUS_OK;
 }
+
+#ifdef KMPP_OPENSSL_SUPPORT
+// Using our own implementation as BN_native2bn and BN_bn2nativepad are available in OpenSSL 1.1
+// Converts a native byte array to a BIGNUM structure.
+BIGNUM *KeyIso_BN_native2bn(const unsigned char *s, int len, BIGNUM *ret)
+{
+    if (IS_LITTLE_ENDIAN)
+        return BN_lebin2bn(s, len, ret);
+    return BN_bin2bn(s, len, ret);
+}
+
+int KeyIso_BN_bn2nativepad(const BIGNUM *a, unsigned char *to, int tolen)
+{
+    if (IS_LITTLE_ENDIAN)
+        return BN_bn2lebinpad(a, to, tolen);
+    return BN_bn2binpad(a, to, tolen);
+}
+#endif

@@ -321,22 +321,10 @@ const char *KeyIso_conf_get_string(
     const CONF *conf,
     const char *name)
 {
-    const char *title = KEYISOP_CREATE_SELF_SIGN_TITLE;
     char *str = NULL;
-    int flags = 0;
-
     ERR_clear_error();
-
     str = NCONF_get_string(conf, "self_sign", name);
-    if (str == NULL) {
-        if (strcmp(name, KMPP_KEY_USAGE_STR) == 0) {
-            flags = KEYISOP_TRACELOG_WARNING_FLAG;
-        } 
-        KEYISOP_trace_log_openssl_error(correlationId, flags, title, name);
-    }
-
     ERR_clear_error();
-
     return (const char *) str;
 }
 
@@ -907,7 +895,7 @@ static int _cleanup_get_ec_evp_key(
 #define _CLEANUP_GET_EC_EVP_KEY(res, message) \
     _cleanup_get_ec_evp_key(correlationId, res, evpKey, ecKey, ecGroup, bnCtx, bnEcPubX, bnEcPubY, bnEcPrivD, ecPoint, message)
 
-static int _get_ec_evp_key(
+int KeyIso_get_ec_evp_key(
     const uuid_t correlationId,
     uint32_t curve,
     uint32_t ecPubKeyLen,
@@ -962,7 +950,7 @@ int KeyIso_get_ec_evp_pub_key_from_st(
         return STATUS_FAILED;
     }
 
-    return _get_ec_evp_key(correlationId,
+    return KeyIso_get_ec_evp_key(correlationId,
                            inEcStPublicKey->ecCurve,
                            inEcStPublicKey->ecPubKeyLen,
                            inEcStPublicKey->ecPubKeyBytes,
@@ -984,7 +972,7 @@ int KeyIso_get_ec_evp_pkey(
     }
 
     uint32_t ecPubKeyLen = inEcStPkey->ecPubXLen + inEcStPkey->ecPubYLen;
-    return _get_ec_evp_key(correlationId,
+    return KeyIso_get_ec_evp_key(correlationId,
                            inEcStPkey->ecCurve,
                            ecPubKeyLen,
                            inEcStPkey->ecKeyBytes,

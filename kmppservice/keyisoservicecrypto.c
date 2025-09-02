@@ -27,47 +27,14 @@
 
 #define KMPP_ALGO_VERSION_LENGTH_SIZE 1 // 1 byte for the length of the algorithm version
 
+// Isolation solution type
+KeyIsoSolutionType g_isolationSolutionType;
+extern KeyIso_get_current_valid_secret_func_ptr KeyIso_get_current_valid_secret_func;
+extern KeyIso_get_secret_by_id_func_ptr KeyIso_get_secret_by_id_func;
+
 /////////////////////////////////////////////////////
 //////////////// Internal KDF methods ///////////////
 /////////////////////////////////////////////////////
-
-int KeyIso_symcrypt_pbe_key_derivation(
-    const uuid_t correlationId, 
-    PCSYMCRYPT_MAC  macAlgorithm,
-    uint64_t iterationCnt,
-    const unsigned char *password,
-    uint32_t passwordLen,
-    const unsigned char *salt,  // optional
-    uint32_t saltLen,
-    unsigned char *kdf2Key,
-    uint32_t kdf2KeyLen)
-{
-    const char *title = KEYISOP_IMPORT_KEY_TITLE;
-    SYMCRYPT_ERROR scError = SYMCRYPT_NO_ERROR;
-    uint32_t passlen = 0;
-
-    if (passwordLen == UINT32_MAX) { // since that passwordLen is uint32_t, if it assigned with -1 it will be UINT32_MAX
-        passlen = strlen((char *)password);
-    } else {
-        passlen = passwordLen;
-    }
-
-    scError = SymCryptPbkdf2(
-        macAlgorithm,
-        password,   
-		passlen,
-        salt,                         
-		saltLen,                            
-        iterationCnt,
-        kdf2Key,
-        kdf2KeyLen);
-    if (scError != SYMCRYPT_NO_ERROR) {
-        KEYISOP_trace_log_error_para(correlationId, 0, title, NULL, "SymCryptPbkdf2 Failed", "scError: %d", scError);
-        return STATUS_FAILED;
-    }
-    
-    return STATUS_OK;
-}
 
 int KeyIso_symcrypt_kdf_key_derivation(
     const uuid_t correlationId, 
@@ -102,6 +69,444 @@ int KeyIso_symcrypt_kdf_key_derivation(
     return STATUS_OK;
 }
 
+int KeyIso_kdf_generate_key(
+    const uuid_t correlationId,
+    PCSYMCRYPT_MAC macAlgorithm,
+    unsigned char *secretSalt,
+    uint32_t secretSaltLen,
+    unsigned char *secretId,
+    uint32_t *secretIdLen,
+    unsigned char *derivedKey,
+    uint32_t derivedKeyLen)
+{
+    int ret = STATUS_FAILED;
+    if (!secretId || !secretSalt || !derivedKey || !macAlgorithm) {
+        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_SERVICE_TITLE, "Invalid input", "NULL input parameters");
+        return ret;
+    }
+
+    if (derivedKeyLen != macAlgorithm->resultSize) {
+        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_SERVICE_TITLE, "derivedKeyLen", "Invalid length");
+        return ret;
+    }
+
+    if (secretSaltLen != KMPP_SALT_SHA256_SIZE) {
+        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_SERVICE_TITLE, "secretSaltLen", "Invalid length");
+        return ret;
+    }
+
+    uint32_t machineSecretLen = 0;
+    uint8_t *machineSecret = NULL;
+
+    // 1. Generate a random salt
+    ret = KeyIso_rand_bytes(secretSalt, secretSaltLen);
+    if (ret != STATUS_OK) {
+        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_SERVICE_TITLE, "KeyIso_rand_bytes", "Failed to generate random bytes");
+        return ret;
+    }
+
+    // 2. Get latest machine secret under a read lock using an abstration interface
+    if(!KeyIso_get_current_valid_secret_func){
+        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_SERVICE_TITLE, NULL, "Current valid secret retrieval function not set");
+        return STATUS_FAILED;
+    }
+
+    ret = KeyIso_get_current_valid_secret_func(
+        correlationId,
+        secretIdLen,
+        secretId,
+        &machineSecretLen,
+        &machineSecret);
+    if (ret != STATUS_OK) {
+        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_SERVICE_TITLE, "KeyIso_get_current_valid_secret_func", "Failed to get machine secret");
+        KeyIso_cleanse(secretSalt, secretSaltLen);
+        return ret;
+    }
+
+    // 3. Derive keys using KDF - SP800-108
+    ret = KeyIso_symcrypt_kdf_key_derivation(
+        correlationId,
+        macAlgorithm,
+        machineSecret,
+        machineSecretLen,
+        NULL,
+        0,
+        secretSalt,
+        secretSaltLen,
+        derivedKey,
+        derivedKeyLen);
+    if (ret != STATUS_OK) {
+        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_SERVICE_TITLE, "KeyIso_symcrypt_kdf_key_derivation", "Failed to generate keys");
+        KeyIso_cleanse(secretSalt, secretSaltLen);
+        KeyIso_cleanse(secretId, *secretIdLen);
+        KeyIso_cleanse(derivedKey, derivedKeyLen);
+    }
+
+    KeyIso_clear_free(machineSecret, machineSecretLen);  
+    return ret;
+}
+
+int KeyIso_kdf_generate_key_by_id(
+    const uuid_t correlationId,
+    const unsigned char *secretId,
+    uint32_t secretIdLen,
+    PCSYMCRYPT_MAC macAlgorithm,
+    const unsigned char *secretSalt,
+    uint32_t secretSaltLen,
+    unsigned char *derivedKey,
+    uint32_t derivedKeyLen)
+{
+    int ret = STATUS_FAILED;
+    if (!secretId || !secretSalt || !derivedKey || !macAlgorithm) {
+        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_SERVICE_TITLE, "Invalid input", "NULL input parameters");
+        return ret;
+    }
+
+    if (derivedKeyLen != macAlgorithm->resultSize) {
+        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_SERVICE_TITLE, "derivedKeyLen", "Invalid length");
+        return ret;
+    }
+
+    if (secretSaltLen != KMPP_SALT_SHA256_SIZE) {
+        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_SERVICE_TITLE, "secretSaltLen", "Invalid length");
+        return ret;
+    }
+
+    // 1. Get latest machine secret under a read lock
+    uint32_t machineSecretLen = 0;
+    uint8_t *machineSecret = NULL;
+
+    if(!KeyIso_get_secret_by_id_func){
+        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_SERVICE_TITLE, NULL, "Current valid secret retrieval function not set");
+        return STATUS_FAILED;
+    }
+
+    ret = KeyIso_get_secret_by_id_func(
+        correlationId,
+        secretIdLen,
+        secretId,
+        &machineSecretLen,
+        &machineSecret);
+    if (ret != STATUS_OK) {
+        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_SERVICE_TITLE, "KeyIso_get_secret_by_id_func", "Failed to get machine secret");
+        return ret;
+    }
+
+    // 2. Derive keys using KDF - SP800-108
+    ret = KeyIso_symcrypt_kdf_key_derivation(
+        correlationId,
+        macAlgorithm,
+        machineSecret,
+        machineSecretLen,
+        NULL,
+        0,
+        secretSalt,
+        secretSaltLen,
+        derivedKey,
+        derivedKeyLen);
+    if (ret != STATUS_OK) {
+        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_SERVICE_TITLE, "KeyIso_symcrypt_kdf_key_derivation", "Failed to generate keys");
+        KeyIso_cleanse(derivedKey, derivedKeyLen);
+    }
+
+    KeyIso_clear_free(machineSecret, machineSecretLen);
+    return ret;
+}
+
+int KeyIso_symcrypt_kdf_encrypt_hmac(
+    const uuid_t correlationId,
+    uint32_t version,
+    unsigned char *secretId,         // secret id - uuid_t in process based (GUID), 32 bytes in TA (extra salt)
+    uint32_t *secretIdLen,           // secret id length
+    unsigned char *secretSalt,       // salt for KDF
+    uint32_t secretSaltLen,          // secretSaltLen: KMPP_SALT_SHA256_SIZE
+    unsigned char *iv,               // AES IV, `
+    uint32_t ivLen,                  // ivLen: KMPP_AES_BLOCK_SIZE 
+    const unsigned char *inBuf,      // private key to encrypt 
+    unsigned char *outBuf,           // encrypted private key
+    uint32_t bufLen,                 // multiple of KMPP_AES_BLOCK_SIZE
+    unsigned char *hmac,             // HMAC result
+    uint32_t hmacLen)                // hmacLen: KMPP_HMAC_SHA256_KEY_SIZE
+{
+    int ret = STATUS_FAILED;
+    const char *title = KEYISOP_IMPORT_KEY_TITLE;
+
+    if (!inBuf || !outBuf || !hmac || !iv || !secretSalt || !secretId || !secretIdLen) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "Invalid input", "NULL input parameters");
+        return ret;
+    }
+
+    if (hmacLen != KMPP_HMAC_SHA256_KEY_SIZE) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "hmacLen", "Invalid length");
+        return ret;
+    }
+
+    if (ivLen != KMPP_AES_BLOCK_SIZE) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "ivLen", "Invalid length");
+        return ret;
+    }
+
+    if (secretSaltLen != KMPP_SALT_SHA256_SIZE) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "secretSaltLen", "Invalid length");
+        return ret;
+    }
+
+    if (bufLen == 0 || bufLen % KMPP_AES_BLOCK_SIZE != 0) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "bufLen", "Buffer length must be a multiple of KMPP_AES_BLOCK_SIZE");
+        return ret;
+    }
+
+    unsigned int index = 0;
+    unsigned int hmacDataLen = 0;
+    unsigned int metaDataLen = sizeof(KEYISO_CLIENT_METADATA_HEADER_ST);
+    unsigned int versionLen = sizeof(version);  // CB: verify the way to get the version length
+    unsigned char *pMacData = NULL;
+
+    KEYISO_CLIENT_METADATA_HEADER_ST metaData = {
+        .version = (uint8_t)KEYISOP_CURRENT_VERSION,
+        .isolationSolution = (uint16_t)g_isolationSolutionType
+    };
+
+    // 1. Deriving 512-bit key from the current machine secret and a random salt using KDF (SP800-108)
+    unsigned char derivedKey[KMPP_AES_512_KEY_SIZE] = {0};
+    unsigned int derivedKeyLen = KMPP_AES_512_KEY_SIZE;
+
+    ret = KeyIso_kdf_generate_key(
+        correlationId,
+        SymCryptHmacSha512Algorithm,
+        secretSalt,
+        secretSaltLen,
+        secretId,
+        secretIdLen,
+        derivedKey,
+        derivedKeyLen);
+    if (ret != STATUS_OK) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "kdf generate key", "failed to generate key");
+        return STATUS_FAILED;
+    }
+
+    // 2. Derive the AES key and HMAC key from the derived key
+    // 256-bit AES key and 256-bit HMAC key
+    unsigned char *aesKey = derivedKey;
+    unsigned char *hmacKey = derivedKey + KMPP_AES_256_KEY_SIZE;
+
+    // 3. Encrypt the input buffer using AES with the derived AES key
+    ret = KeyIso_symcrypt_aes_encrypt_decrypt(
+        correlationId,
+        KEYISO_AES_ENCRYPT_MODE,
+        KEYISO_AES_PADDING_NONE,
+        iv,
+        ivLen,
+        aesKey,
+        KMPP_AES_256_KEY_SIZE,
+        inBuf,
+        bufLen,
+        outBuf,
+        &bufLen);
+    if (ret != STATUS_OK) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "KeyIso_symcrypt_aes_encrypt_decrypt", "Failed");
+        KeyIso_cleanse(derivedKey, derivedKeyLen);
+        return STATUS_FAILED;
+    }
+    
+    // 4. Calculate HMAC of the encrypted data using the derived HMAC key
+
+    /*
+        MAC DATA := AlgVersionLen | AlgVersion | client meta data | secretSalt | secretId | iv | cipherText
+    */
+    hmacDataLen = versionLen + metaDataLen + secretSaltLen + *secretIdLen + ivLen + bufLen;
+    pMacData = (unsigned char *) KeyIso_zalloc(hmacDataLen);
+    if (!pMacData) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "pMacData", "Memory allocation failed");
+        KeyIso_cleanse(derivedKey, derivedKeyLen);
+        return STATUS_FAILED;
+    }
+
+    // Copy data for mac calculation
+    memcpy(pMacData + index, &version, versionLen);
+    index += versionLen;
+    memcpy(pMacData + index, &metaData, metaDataLen);
+    index += metaDataLen;
+    memcpy(pMacData + index, secretSalt, secretSaltLen);
+    index += secretSaltLen;
+    memcpy(pMacData + index, secretId, *secretIdLen);
+    index += *secretIdLen;
+    memcpy(pMacData + index, iv, ivLen);
+    index += ivLen;
+    memcpy(pMacData + index, outBuf, bufLen);
+    index += bufLen;
+    if (index != hmacDataLen) {
+        KEYISOP_trace_log_error_para(correlationId, 0, title, "MAC data length", "Invalid MAC data length", "expected: %u, actual: %u", hmacDataLen, index);
+        KeyIso_cleanse(derivedKey, derivedKeyLen);
+        KeyIso_free(pMacData);
+        return STATUS_FAILED;
+    }
+
+    // MAC calculation
+    ret = KeyIso_sha256_hmac_calculation(
+        correlationId,
+        pMacData,
+        hmacDataLen,
+        hmacKey,
+        KMPP_HMAC_SHA256_KEY_SIZE,
+        hmac);
+    
+    KeyIso_free(pMacData);
+    KeyIso_cleanse(derivedKey, derivedKeyLen);
+
+    if (ret != STATUS_OK) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "KeyIso_sha256_hmac_calculation", "Failed");
+    }
+    return ret;
+}
+
+int KeyIso_symcrypt_kdf_decrypt_hmac(
+    const uuid_t correlationId,
+    uint32_t version,
+    const unsigned char *metaData,
+    uint32_t metaDataLen,
+    const unsigned char * secretId,  // secret id - uuid_t in process based (GUID), 32 bytes in TA (extra salt)
+    uint32_t secretIdLen,            // secret id len: sizeof(UUID) or KMPP_MAX_SECRET_ID_SIZE (32 bytes) in TA
+    const unsigned char *secretSalt, // salt for KDF
+    uint32_t secretSaltLen,          // secretSaltLen: KMPP_SALT_SHA256_SIZE
+    unsigned char *iv,               // AES IV
+    uint32_t ivLen,                  // ivLen: KMPP_AES_BLOCK_SIZE
+    const unsigned char *hmac,       // HMAC result
+    uint32_t hmacLen,                // hmacLen: KMPP_HMAC_SHA256_KEY_SIZE
+    const unsigned char *inBuf,      // encrypted private key
+    unsigned char *outBuf,           // decrypted private key
+    uint32_t bufLen)                 // multiple of KMPP_AES_BLOCK_SIZE
+{
+    int ret = STATUS_FAILED;
+    const char *title = KEYISOP_IMPORT_KEY_TITLE;
+
+    if (!inBuf || !outBuf || !hmac || !iv || !secretSalt || !metaData) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "Invalid input", "NULL input parameters");
+        return ret;
+    }
+
+    if (hmacLen != KMPP_HMAC_SHA256_KEY_SIZE) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "hmacLen", "Invalid length");
+        return ret;
+    }
+
+    if (ivLen != KMPP_AES_BLOCK_SIZE) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "ivLen", "Invalid length");
+        return ret;
+    }
+
+    if (secretSaltLen != KMPP_SALT_SHA256_SIZE) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "secretSaltLen", "Invalid length");
+        return ret;
+    }
+
+    if (bufLen == 0 || bufLen % KMPP_AES_BLOCK_SIZE != 0) {
+        KEYISOP_trace_log_error(correlationId, 0, title, "bufLen", "Buffer length must be a multiple of KMPP_AES_BLOCK_SIZE");
+        return ret;
+    }
+
+    unsigned int index = 0;
+    unsigned int hmacDataLen = 0;
+    unsigned int versionLen = sizeof(version);
+    unsigned char *pMacData = NULL;
+    unsigned char hmacResult[KMPP_HMAC_SHA256_KEY_SIZE] = {0}; // HMAC result buffer
+
+    // 1. Deriving 512-bit key from the current machine secret and a random salt using KDF (SP800-108)
+    unsigned char derivedKey[KMPP_AES_512_KEY_SIZE] = {0};
+    unsigned int derivedKeyLen = sizeof(derivedKey);
+
+    ret = KeyIso_kdf_generate_key_by_id(
+        correlationId,
+        secretId,
+        secretIdLen,
+        SymCryptHmacSha512Algorithm,
+        secretSalt,
+        secretSaltLen,
+        derivedKey,
+        derivedKeyLen);
+    if (ret != STATUS_OK) {
+        KEYISOP_trace_log_error(correlationId, 0, title, KMPP_INTEGRITY_ERR_STR, "Failed");
+        return STATUS_FAILED;
+    }
+
+    // 256-bit AES key and 256-bit HMAC key
+    unsigned char *aesKey = derivedKey;
+    unsigned char *hmacKey = derivedKey + KMPP_AES_256_KEY_SIZE;
+    
+    // 3. Calculate HMAC of the encrypted data using the derived HMAC key
+
+    /*
+        MAC DATA := AlgVersion | client meta data | secretSalt | secretId | iv | cipherText
+    */
+    hmacDataLen = versionLen + metaDataLen + secretSaltLen + secretIdLen + ivLen + bufLen;
+    pMacData = (unsigned char *) KeyIso_zalloc(hmacDataLen);
+    if (!pMacData) {
+        KeyIso_cleanse(derivedKey, derivedKeyLen);
+        return STATUS_FAILED;
+    }
+
+    // Copy data for mac calculation
+    memcpy(pMacData + index, &version, versionLen);
+    index += versionLen;
+    memcpy(pMacData + index, metaData, metaDataLen);
+    index += metaDataLen;
+    memcpy(pMacData + index, secretSalt, secretSaltLen);
+    index += secretSaltLen;
+    memcpy(pMacData + index, secretId, secretIdLen);
+    index += secretIdLen;
+    memcpy(pMacData + index, iv, ivLen);
+    index += ivLen;
+    memcpy(pMacData + index, inBuf, bufLen);
+    index += bufLen;
+    if (index != hmacDataLen) {
+        KEYISOP_trace_log_error(correlationId, 0, title, KMPP_INTEGRITY_ERR_STR, "Failed");
+        KeyIso_cleanse(derivedKey, derivedKeyLen);
+        KeyIso_free(pMacData);
+        return STATUS_FAILED;
+    }
+
+    /* NOTE:
+     * The following operation must be perform in constant time to avoid timing attacks
+     * Therefore, we will concatenate the return value and check for error at the end.
+     * In addition, it is crucial to provide a generic error message to avoid leaking 
+     * information about the failure reason.
+     */
+
+    // MAC calculation
+    ret = KeyIso_sha256_hmac_calculation(
+        correlationId,
+        pMacData,
+        hmacDataLen,
+        hmacKey,
+        sizeof(hmacResult),
+        hmacResult); 
+
+    // MAC verification
+    ret &= KeyIso_hmac_validation(hmac, hmacResult, KMPP_HMAC_SHA256_KEY_SIZE);
+
+    // 4. Encrypt the input buffer using AES with the derived AES key
+    ret &= KeyIso_symcrypt_aes_encrypt_decrypt(
+        correlationId,
+        KEYISO_AES_DECRYPT_MODE,
+        KEYISO_AES_PADDING_NONE,
+        iv,
+        ivLen,
+        aesKey,
+        KMPP_AES_256_KEY_SIZE,
+        inBuf,
+        bufLen,
+        outBuf,
+        &bufLen);
+
+    if (ret != STATUS_OK) {
+        KEYISOP_trace_log_error(correlationId, 0, title, KMPP_INTEGRITY_ERR_STR, "Failed");
+    }
+
+    KeyIso_free(pMacData);
+    KeyIso_cleanse(derivedKey, derivedKeyLen);
+    return ret;
+}
+
 /////////////////////////////////////////////////////
 //////////////// Internal AES methods ///////////////
 /////////////////////////////////////////////////////
@@ -126,7 +531,7 @@ int KeyIso_symcrypt_aes_encrypt_decrypt(
     SYMCRYPT_ERROR scError = SYMCRYPT_NO_ERROR;
 
     if (keyLen != KMPP_AES_256_KEY_SIZE) {
-        KEYISOP_trace_log_error_para(correlationId, 0, title, "key length", "incorrect IV length"," Got key len: %d", keyLen);  
+        KEYISOP_trace_log_error_para(correlationId, 0, title, "key length", "incorrect key length"," Got key len: %d", keyLen);  
         return STATUS_FAILED;
     }
 
@@ -285,322 +690,6 @@ int KeyIso_padding_pkcs7_remove(
 
     *removedPaddingDataLen = pcbResult;
     return STATUS_OK;
-}
-
-/////////////////////////////////////////////////////
-/////////////// Internal PBE methods ////////////////
-/////////////////////////////////////////////////////
-
-static int _pbe_decrypt_hmac_cleanup(
-    int ret,
-    const uuid_t correlationId,
-    const char *title,
-    unsigned char *macData,
-    unsigned char *derivedKey,
-    size_t derivedKeyLen)
-{
-    if (ret != STATUS_OK)
-        KEYISOP_trace_log_error(correlationId, 0, title, KMPP_INTEGRITY_ERR_STR, "Failed");
-
-    if (macData)
-        KeyIso_free(macData);
-    if (derivedKey)
-        KeyIso_clear_free(derivedKey, derivedKeyLen);
-
-    return ret;
-}
-
-int KeyIso_symcrypt_pbe_decrypt_hmac(
-    const uuid_t correlationId,
-    const char *title,
-    uint32_t version,
-    const unsigned char *password,
-    uint32_t passwordLen,
-    const unsigned char *salt,
-    uint32_t saltLen,
-    unsigned char *iv,
-    uint32_t ivLen,
-    const unsigned char *hmac,
-    uint32_t hmacLen,   
-    const unsigned char *inBuf, 
-    unsigned char *outBuf,
-    uint32_t bufLen)
-{
-    if (!salt || !iv || !hmac || !inBuf) {
-        KEYISOP_trace_log_error(correlationId, 0, title, "Invalid input", "NULL input parameters");
-        return STATUS_FAILED;
-    }
-
-    int ret = STATUS_FAILED;
-
-    unsigned int iterationCnt = KMPP_PKCS5_DEFAULT_ITER;
-    unsigned int hmacDataLen = 0;
-    unsigned int derivedKeyLen = 0;
-    unsigned int index = 0;
-    unsigned int versionLenSize = KMPP_ALGO_VERSION_LENGTH_SIZE;
-
-    unsigned char versionLen = sizeof(version);
-    unsigned char *macData = NULL;
-    unsigned char *derivedKey = NULL;
-
-    unsigned char hmacResult[KMPP_AES_256_KEY_SIZE];
-
-    // Deriving a key
-    derivedKeyLen = SymCryptHmacSha512Algorithm->resultSize;
-    derivedKey = (unsigned char*)KeyIso_zalloc(derivedKeyLen);
-    if (!derivedKey)
-        return STATUS_FAILED;
-
-    // The following switch is for backward compatibility
-    switch (version)
-    {
-        case AlgorithmVersion_V1:
-            iterationCnt = KMPP_PKCS5_DEFAULT_ITER_V1;   // previous iteration count
-            versionLenSize = 0;                          // No versionLen in the mac data
-            break;
-        case AlgorithmVersion_V2:
-            versionLenSize = 0;                          // No versionLen in the mac data
-            break;
-        case AlgorithmVersion_V3:
-            // No changes since V3 is the current version
-            break;                  
-        default:
-            break;
-    }
-
-    ret = KeyIso_symcrypt_pbe_key_derivation(
-        correlationId,
-        SymCryptHmacSha512Algorithm,
-        iterationCnt,
-        password,
-        passwordLen,
-        salt,
-        saltLen,
-        derivedKey,
-        derivedKeyLen);
-    if (ret != STATUS_OK)
-            return _pbe_decrypt_hmac_cleanup(STATUS_FAILED, correlationId, title, NULL, derivedKey, derivedKeyLen);
-
-    // MAC calculation
-    // MAC DATA = versionLen | version | salt | iv | cipherText
-    hmacDataLen = versionLenSize + versionLen + saltLen + ivLen + bufLen;
-    macData = (unsigned char *) KeyIso_zalloc(hmacDataLen);
-    if (!macData)
-        return _pbe_decrypt_hmac_cleanup(STATUS_FAILED, correlationId, title, NULL, derivedKey, derivedKeyLen);
-    // Copy data for mac calculation
-    memcpy(macData, &versionLen, versionLenSize);
-    index += versionLenSize;
-    memcpy(macData, &version, versionLen);
-    index += versionLen;
-    memcpy(macData + index, salt, saltLen);
-    index += saltLen;
-    memcpy(macData + index, iv, ivLen);
-    index += ivLen;
-    memcpy(macData + index, inBuf, bufLen);
-
-    ret = KeyIso_sha256_hmac_calculation(
-        correlationId,
-        macData,
-        hmacDataLen,
-        derivedKey + KMPP_HMAC_SHA256_KEY_SIZE,
-        KMPP_HMAC_SHA256_KEY_SIZE,
-        hmacResult);
-    if (ret != STATUS_OK)
-        return _pbe_decrypt_hmac_cleanup(STATUS_FAILED, correlationId, title, macData, derivedKey, derivedKeyLen);
-
-    // MAC verification
-    if((hmacLen != sizeof(hmacResult)) || (KeyIso_hmac_validation(hmac, hmacResult, KMPP_HMAC_SHA256_KEY_SIZE) != STATUS_OK))
-        return _pbe_decrypt_hmac_cleanup(STATUS_FAILED, correlationId, title, macData, derivedKey, derivedKeyLen);
-
-    // Key decryption
-    ret = KeyIso_symcrypt_aes_encrypt_decrypt(
-        correlationId,
-        KEYISO_AES_DECRYPT_MODE,
-        KEYISO_AES_PADDING_NONE,
-        iv,
-        ivLen,
-        derivedKey,
-        KMPP_AES_256_KEY_SIZE,
-        inBuf,
-        bufLen,
-        outBuf,
-        &bufLen);
-    return _pbe_decrypt_hmac_cleanup(ret, correlationId, title, macData, derivedKey, derivedKeyLen);
-}
-
-int KeyIso_symcrypt_pbe_encrypt_hmac(
-    const uuid_t correlationId,
-    const char *title,
-    uint32_t version,
-    const unsigned char *password,
-    uint32_t passwordLen,
-    const unsigned char *salt,   // optional
-    uint32_t saltLen,
-    unsigned char *iv,           // ivLen: KMPP_AES_BLOCK_SIZE
-    uint32_t ivLen,    
-    const unsigned char *inBuf, 
-    unsigned char *outBuf,
-    uint32_t bufLen,             // multiple of KMPP_AES_BLOCK_SIZE
-    unsigned char *hmac,
-    uint32_t hmacLen)
-{
-    if (hmacLen != KMPP_HMAC_SHA256_KEY_SIZE) {
-        KEYISOP_trace_log_error(correlationId, 0, title, "hmacLen", "Invalid length");
-        return STATUS_FAILED;
-    }
-
-    if (!salt || !iv) {
-        KEYISOP_trace_log_error(correlationId, 0, title, "Invalid input", "NULL input parameters");
-        return STATUS_FAILED;
-    }
-
-    int ret = STATUS_FAILED;
-
-    unsigned int index = 0;
-    unsigned int hmacDataLen = 0;
-    unsigned int derivedKeyLen = 0;
-    unsigned int versionLenSize = KMPP_ALGO_VERSION_LENGTH_SIZE;
-
-    unsigned char versionLen = sizeof(version);
-    unsigned char *pMacKey = NULL;
-    unsigned char *pMacData = NULL;
-    unsigned char *pDerivedKey = NULL;
-    
-    // PKCS #5 password-based encryption
-    ret = KeyIso_symcrypt_pbe(
-        correlationId,
-        title,
-        KEYISO_AES_ENCRYPT_MODE,
-        password,
-        passwordLen,
-        salt,
-        saltLen,
-        iv,
-        ivLen,
-        inBuf,
-        outBuf,
-        bufLen,
-        &pDerivedKey,
-        &derivedKeyLen);
-    if (ret != STATUS_OK) {
-        KEYISOP_trace_log_error(correlationId, 0, title, "KeyIso_symcrypt_pbe", "Failed");
-        return STATUS_FAILED;
-    }
-
-    if (derivedKeyLen != KMPP_AES_512_KEY_SIZE) {
-        KEYISOP_trace_log_error(correlationId, 0, title, "derivedKeyLen", "Invalid length");
-        KeyIso_clear_free(pDerivedKey, derivedKeyLen);
-        return STATUS_FAILED;
-    }
-
-    // MAC DATA = versionLen | version | salt | iv | cipherText
-    hmacDataLen = versionLenSize + versionLen + saltLen + ivLen + bufLen;
-    pMacData = (unsigned char *) KeyIso_zalloc(hmacDataLen);
-    if (!pMacData) {
-        KEYISOP_trace_log_error(correlationId, 0, title, "pMacData", "Memory allocation failed");
-        KeyIso_clear_free(pDerivedKey, derivedKeyLen);
-        return STATUS_FAILED;
-    }
-
-    // Copy data for mac calculation
-    memcpy(pMacData, &versionLen, versionLenSize);
-    index += versionLenSize;
-    memcpy(pMacData, &version, versionLen);
-    index += versionLen;
-    memcpy(pMacData + index, salt, saltLen);
-    index += saltLen;
-    memcpy(pMacData + index, iv, ivLen);
-    index += ivLen;
-    memcpy(pMacData + index, outBuf, bufLen);
-
-    // MAC calculation
-    pMacKey = pDerivedKey + KMPP_HMAC_SHA256_KEY_SIZE;
-    ret = KeyIso_sha256_hmac_calculation(
-        correlationId,
-        pMacData,
-        hmacDataLen,
-        pMacKey,
-        KMPP_HMAC_SHA256_KEY_SIZE,
-        hmac); 
-    
-    KeyIso_free(pMacData);
-    KeyIso_clear_free(pDerivedKey, derivedKeyLen);
-
-    if (ret != STATUS_OK) {
-        KEYISOP_trace_log_error(correlationId, 0, title, "KeyIso_sha256_hmac_calculation", "Failed");
-        return ret;
-    }
-
-    return ret;
-}
-
-int KeyIso_symcrypt_pbe(
-    const uuid_t correlationId,
-    const char *title,
-    const int mode,
-    const unsigned char *password,
-    uint32_t passwordLen,
-    const unsigned char *salt,   // optional
-    uint32_t saltLen,
-    unsigned char *iv,           // ivLen: KMPP_AES_BLOCK_SIZE
-    uint32_t ivLen,    
-    const unsigned char *inBuf, 
-    unsigned char *outBuf,
-    uint32_t bufLen,             // multiple of KMPP_AES_BLOCK_SIZE
-    unsigned char **derivedKey,
-    uint32_t *keySize)
-{
-    int ret = STATUS_FAILED;
-    PCSYMCRYPT_MAC macAlgorithm = SymCryptHmacSha512Algorithm;
-    unsigned char *key = NULL;
-
-    *keySize = macAlgorithm->resultSize;
-    key = (unsigned char*)KeyIso_zalloc(*keySize);
-    if (!key) {
-        KEYISOP_trace_log_error(correlationId, 0, title, "key", "allocation error");
-        return STATUS_FAILED;
-    }
-
-    ret = KeyIso_symcrypt_pbe_key_derivation(
-        correlationId,
-        macAlgorithm,
-        KMPP_PKCS5_DEFAULT_ITER,
-        password,
-        passwordLen,
-        salt,
-        saltLen,
-        key,
-        *keySize);
-    if (ret != STATUS_OK) {
-        KEYISOP_trace_log_error(correlationId, 0, title, "_symcrypt_pbe_key_derivation", "Failed");
-        KeyIso_clear_free(key, *keySize);
-        return ret;
-    } 
-
-    // key: [encKey] [macKey]
-    // Example: For HmacSha512, the size of the derived key is 512 bits.
-    // The first 256 bits will be used as the encryption key,
-    // and the remaining 256 bits will be used as the mac key.
-    ret = KeyIso_symcrypt_aes_encrypt_decrypt(
-        correlationId,
-        mode,
-        KEYISO_AES_PADDING_NONE,
-        iv,
-        ivLen,
-        key,
-        (*keySize)/2,
-        inBuf,
-        bufLen,
-        outBuf,
-        &bufLen);
-    if (ret != STATUS_OK) {
-        KEYISOP_trace_log_error(correlationId, 0, title, "_symcrypt_pbe_encrypt_decrypt", "Failed");
-        KeyIso_clear_free(key, *keySize);
-        return ret;
-    }  
-
-    *derivedKey = key;
-    return ret;
 }
 
 /////////////////////////////////////////////////////
@@ -1299,12 +1388,21 @@ PSYMCRYPT_ECKEY KeyIso_get_ec_symcrypt_pkey(
 size_t KeyIso_get_pkey_bytes_len(int keyType, const void *privateKey)
 {
     size_t keyLen = 0;
+    uint32_t dynamicLen = 0;
     switch (keyType) {
         case KmppKeyType_rsa:
-            keyLen = GET_DYNAMIC_STRUCT_SIZE(KEYISO_RSA_PKEY_ST, KeyIso_get_rsa_pkey_bytes_len((KEYISO_RSA_PKEY_ST *) privateKey));
+            if (KeyIso_get_rsa_pkey_bytes_len((KEYISO_RSA_PKEY_ST *) privateKey, &dynamicLen) != STATUS_OK) {
+                KEYISOP_trace_log_error(NULL, 0, KEYISOP_IMPORT_KEY_TITLE, "_get_private_key_len", "failed to get rsa key length");
+                return 0;
+            }
+            keyLen = GET_DYNAMIC_STRUCT_SIZE(KEYISO_RSA_PKEY_ST, dynamicLen);
             break;
         case KmppKeyType_ec:
-            keyLen = GET_DYNAMIC_STRUCT_SIZE(KEYISO_EC_PKEY_ST, KeyIso_get_ec_pkey_bytes_len((KEYISO_EC_PKEY_ST *) privateKey));
+            if (KeyIso_get_ec_pkey_bytes_len((KEYISO_EC_PKEY_ST *) privateKey, &dynamicLen) != STATUS_OK) {
+                KEYISOP_trace_log_error(NULL, 0, KEYISOP_IMPORT_KEY_TITLE, "_get_private_key_len", "failed to get ec key length");
+                return 0;
+            }
+            keyLen = GET_DYNAMIC_STRUCT_SIZE(KEYISO_EC_PKEY_ST, dynamicLen);
             break;
         default:
             KEYISOP_trace_log_error(NULL, 0, KEYISOP_IMPORT_KEY_TITLE, "_get_private_key_len", "unsupported key type");

@@ -27,6 +27,12 @@ int gettimeofday(
 #include <uuid/uuid.h>
 #endif // #ifdef KEYISO_TEST_WINDOWS
 
+#ifdef KMPP_OPENSSL_SUPPORT
+#include <openssl/bn.h>
+#endif //KMPP_OPENSSL_SUPPORT
+
+#include <stdbool.h>
+
 #ifdef  __cplusplus
 extern "C" {
 #endif
@@ -100,6 +106,20 @@ char *KeyIsoP_get_path_name(
 int KeyIso_rand_bytes(
     unsigned char *buffer,
     int size);
+
+#ifdef KMPP_OPENSSL_SUPPORT
+// Using our own implementation as BN_native2bn and BN_bn2nativepad are available in OpenSSL 1.1
+// Converts a native byte array to a BIGNUM structure.
+BIGNUM* KeyIso_BN_native2bn(
+    const unsigned char* s,
+    int len,
+    BIGNUM* ret);
+
+int KeyIso_BN_bn2nativepad(
+    const BIGNUM* a,
+    unsigned char* to,
+    int tolen);
+#endif // KMPP_OPENSSL_SUPPORT
 
 #ifdef  __cplusplus
 }

@@ -100,7 +100,7 @@
  void KeyIso_initialize_key_list(const uuid_t correlationId,uint32_t capacity)
  {
      const char *title = KEYISOP_SERVICE_TITLE;
-     KMPP_keyCache = KeyIso_create_cache(capacity, _free_key_cb, _ref_count_increment);
+     KMPP_keyCache = KeyIso_cache_create(capacity, _free_key_cb, _ref_count_increment);
      KEYISOP_trace_log_para(correlationId, 0, title, "Initialize key LRU cache ", "cache capacity: %d", capacity);
  }
  

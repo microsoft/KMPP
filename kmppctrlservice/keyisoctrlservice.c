@@ -228,7 +228,7 @@ on_name_lost(GDBusConnection *connection,
         name = "";
     }
 
-    KEYISOP_trace_log_and_metric_para(NULL, 0, KeyIsoSolutionType_process, title, NULL, "sender: %s", name);
+    KEYISOP_trace_log_and_metric_para(NULL, 0, KeyIsoSolutionType_process, 0, title, NULL, "sender: %s", name); //Hardcoded default value: keysInuse library not loaded (not used in this service)
 
     if (loop) {
         g_main_loop_quit(loop);
@@ -258,10 +258,8 @@ on_timeout(gpointer user_data)
     const char *title = KEYISOP_SERVICE_TITLE;
     GMainLoop *loop = (GMainLoop *) user_data;
     gboolean ret = G_SOURCE_CONTINUE;
-    gint activeCount = g_atomic_int_get(&KMPP_GDBUS_activeCount);
-
-    KEYISOP_trace_log_para(NULL, 0, title, NULL,
-        "activeCount: %d lastCount: %d", activeCount, KMPP_GDBUS_lastCount);
+    gint activeCount = g_atomic_int_get(&KMPP_GDBUS_activeCount);    
+    KEYISOP_trace_log_para(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, title, NULL, "activeCount: %d lastCount: %d", activeCount, KMPP_GDBUS_lastCount);
 
     if (activeCount != KMPP_GDBUS_lastCount) {
         KMPP_GDBUS_lastCount = activeCount;
@@ -295,18 +293,18 @@ on_name_acquired(GDBusConnection *connection,
 
     handlerId = g_signal_connect(interface, "handle-cert-ctrl", G_CALLBACK(_on_handle_cert_ctrl), NULL);
     if (handlerId == 0) {
-        KEYISOP_trace_log_and_metric_error(NULL, KeyIsoSolutionType_process, 0, title, "handle-cert-ctrl", "ZeroId");
+        KEYISOP_trace_log_and_metric_error(NULL, KeyIsoSolutionType_process, 0, 0, title, "handle-cert-ctrl", "ZeroId"); //Hardcoded default value: keysInuse library not loaded (not used in this service)
     }
 
     handlerId = g_signal_connect(interface, "handle-get-ctrl-version", G_CALLBACK(_on_handle_get_ctrl_version), NULL);
     if (handlerId == 0) {
-        KEYISOP_trace_log_and_metric_error(NULL, 0, KeyIsoSolutionType_process, title, "handle-get-ctrl-version", "ZeroId");
+        KEYISOP_trace_log_and_metric_error(NULL, 0, KeyIsoSolutionType_process, 0, title, "handle-get-ctrl-version", "ZeroId"); //Hardcoded default value: keysInuse library not loaded (not used in this service)
     }
 
     g_dbus_interface_skeleton_export(G_DBUS_INTERFACE_SKELETON(interface), connection, "/", &error);
     if (error) {
         KMPP_GDBUS_trace_log_glib_error(NULL, 0, title, "g_dbus_interface_skeleton_export", &error);
-        KEYISOP_trace_metric_error(NULL, 0, KeyIsoSolutionType_process, title, "g_dbus_interface_skeleton_export", "glib error");
+        KEYISOP_trace_metric_error(NULL, 0, KeyIsoSolutionType_process, 0, title, "g_dbus_interface_skeleton_export", "glib error"); //Hardcoded default value: keysInuse library not loaded (not used in this service)
     }
 }
 
@@ -435,7 +433,7 @@ int main(int argc, char *argv[])
                 NULL);                          // GDestroyNotify user_data_free_func);
     if (ownerId == 0) {
         KEYISOP_trace_log_error(correlationId, 0, title, "g_bus_own_name", "ZeroId");
-        return 1;
+        return STATUS_OK;
     }
 
     KEYISOP_trace_log_para(correlationId, 0, title, "g_bus_own_name",
@@ -458,11 +456,11 @@ int main(int argc, char *argv[])
     g_bus_unown_name(ownerId);
 #if !defined(KMPP_TELEMETRY_DISABLED) && !defined(KEYISO_TEST_WINDOWS)
     KeyIsoP_stop_cpu_timer();
-#endif
+#endif    
     KEYISOP_trace_log(correlationId, 0, title, "Exit");
-    return 0;
+    return STATUS_FAILED;
 
 BadUsage:
     Usage();
-    return 1;
+    return STATUS_OK;
 }

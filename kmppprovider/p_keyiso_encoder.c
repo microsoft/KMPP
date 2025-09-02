@@ -56,7 +56,7 @@ static void _encoder_freectx(KEYISO_PROV_ENCODER_CTX_ST *ctx)
     KeyIso_free(ctx);
 }
 
-static int _cleanup_import_private_key(int ret, KeyIsoErrReason reason, char *salt, unsigned char *encryptedPfxBytes,
+static int _cleanup_import_private_key(int ret, KeyIsoErrReason reason, char *clientData, unsigned char *encryptedPfxBytes,
     X509 *cert, X509_SIG *encryptedPkey, EVP_PKEY *pubKey, CONF* generatedKeyConfEncoder) 
 {
     if (ret != STATUS_OK) {
@@ -79,8 +79,8 @@ static int _cleanup_import_private_key(int ret, KeyIsoErrReason reason, char *sa
         X509_free(cert);
     }
 
-    if (salt) {
-        KeyIso_clear_free_string(salt);
+    if (clientData) {
+        KeyIso_clear_free_string(clientData);
     }
 
 	if (generatedKeyConfEncoder) {
@@ -91,7 +91,7 @@ static int _cleanup_import_private_key(int ret, KeyIsoErrReason reason, char *sa
 }
 
 #define _CLEANUP_IMPORT_PRIVATE_KEY(ret, reason) \
-    _cleanup_import_private_key(ret, reason, salt, encryptedPfxBytes, cert, encryptedPkey, (ret != STATUS_OK) ? pubKey : NULL, generatedKeyConfEncoder)
+    _cleanup_import_private_key(ret, reason, clientData, encryptedPfxBytes, cert, encryptedPkey, (ret != STATUS_OK) ? pubKey : NULL, generatedKeyConfEncoder)
 
 static int _import_private_key_encoder(uuid_t correlationId, KEYISO_PROV_PKEY *provKey)
 {
@@ -99,7 +99,7 @@ static int _import_private_key_encoder(uuid_t correlationId, KEYISO_PROV_PKEY *p
 
     EVP_PKEY *pKey = provKey->pubKey; // In this scenario, the public key is actually plain text key
     X509_SIG *encryptedPkey = NULL;
-    char* salt = NULL;
+    char* clientData = NULL;
     EVP_PKEY *pubKey = NULL;
     KEYISO_KEY_CTX *keyCtx = NULL;
     int encryptedPfxLength = 0; 
@@ -125,8 +125,8 @@ static int _import_private_key_encoder(uuid_t correlationId, KEYISO_PROV_PKEY *p
     }
  
     // This step transforms a plaintext key into a protected format with encrypted private key data
-    // and salt for key derivation functions
-    if (KeyIso_CLIENT_import_private_key(correlationId, 0, pKey, &encryptedPkey, &salt) != STATUS_OK) {
+    // and clientData for key derivation functions
+    if (KeyIso_CLIENT_import_private_key(correlationId, 0, pKey, &encryptedPkey, &clientData) != STATUS_OK) {
         return _CLEANUP_IMPORT_PRIVATE_KEY(STATUS_FAILED, KeyIsoErrReason_FailedToImport);
     }
     
@@ -150,7 +150,7 @@ static int _import_private_key_encoder(uuid_t correlationId, KEYISO_PROV_PKEY *p
         return _CLEANUP_IMPORT_PRIVATE_KEY(STATUS_FAILED, KeyIsoErrReason_FailedToCreatePfx);
     }
    
-    if (KeyIso_CLIENT_private_key_open_from_pfx(correlationId, encryptedPfxLength, encryptedPfxBytes, salt, &keyCtx) != STATUS_OK) {
+    if (KeyIso_CLIENT_private_key_open_from_pfx(correlationId, encryptedPfxLength, encryptedPfxBytes, clientData, &keyCtx) != STATUS_OK) {
         return _CLEANUP_IMPORT_PRIVATE_KEY(STATUS_FAILED, KeyIsoErrReason_FailedToGetKeyCtx);
     }
 
@@ -166,7 +166,7 @@ static int _import_private_key_encoder(uuid_t correlationId, KEYISO_PROV_PKEY *p
     return _CLEANUP_IMPORT_PRIVATE_KEY(STATUS_OK, KeyIsoErrReason_NoError);
 }
 
-static int _cleanup_encoder_encode(int ret, KeyIsoErrReason reason, char *keyId, BIO *bio)
+static int _cleanup_encoder_encode(int ret, KeyIsoErrReason reason, char *keyId, BIO *bio, char *clientData)
 {
     if (ret != STATUS_OK) {
         KMPPerr(reason);
@@ -176,12 +176,14 @@ static int _cleanup_encoder_encode(int ret, KeyIsoErrReason reason, char *keyId,
         KeyIso_clear_free_string(keyId);
     if (bio)
         BIO_free(bio);
+    if (clientData)
+        KeyIso_clear_free_string(clientData);
 
     return ret;
 }
 
 #define _CLEANUP_ENCODER_ENCODE(ret, reason) \
-    _cleanup_encoder_encode(ret, reason, keyId, bio)
+    _cleanup_encoder_encode(ret, reason, keyId, bio, clientData)
 
 static int _encoder_encode(KEYISO_PROV_ENCODER_CTX_ST* ctx, OSSL_CORE_BIO* coreBio, const KEYISO_PROV_PKEY* pKey,
     ossl_unused const OSSL_PARAM params[], int selection, ossl_unused OSSL_PASSPHRASE_CALLBACK* cb, ossl_unused void* cbarg)
@@ -189,6 +191,7 @@ static int _encoder_encode(KEYISO_PROV_ENCODER_CTX_ST* ctx, OSSL_CORE_BIO* coreB
     KEYISOP_trace_log_para(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_PROVIDER_TITLE, "Start", "selection: %d", selection);
     uuid_t correlationId;
     char* keyId = NULL;
+    char *clientData = NULL;
     BIO* bio = NULL;
 
     KeyIso_rand_bytes(correlationId, sizeof(correlationId));
@@ -211,8 +214,18 @@ static int _encoder_encode(KEYISO_PROV_ENCODER_CTX_ST* ctx, OSSL_CORE_BIO* coreB
         return _CLEANUP_ENCODER_ENCODE(STATUS_FAILED, KeyIsoErrReason_InvalidParams);
     }
 
-    // Construct keyId out of the new encryptedBytes and salt stored in the keyCtx
-    if (KeyIso_format_pfx_engine_key_id(correlationId, keyDetails->keyLength, keyDetails->keyBytes, keyDetails->salt, &keyId) != STATUS_OK) {
+    KEYISO_CLIENT_DATA_ST *clientDataSt = (KEYISO_CLIENT_DATA_ST *)(keyDetails->clientData);
+    if (clientDataSt == NULL) {
+        return _CLEANUP_ENCODER_ENCODE(STATUS_FAILED, KeyIsoErrReason_InvalidParams);
+    }
+    
+    clientData = KeyIso_get_base64_client_data(correlationId, KEYISOP_GEN_KEY_TITLE, clientDataSt);
+    if (clientData == NULL) {
+        return _CLEANUP_ENCODER_ENCODE(STATUS_FAILED, KeyIsoErrReason_InvalidParams);
+    }
+
+    // Construct keyId out of the new encryptedBytes and clientData stored in the keyCtx
+    if (KeyIso_format_pfx_engine_key_id(correlationId, keyDetails->keyLength, keyDetails->keyBytes, clientData, &keyId) != STATUS_OK) {
         return _CLEANUP_ENCODER_ENCODE(STATUS_FAILED, KeyIsoErrReason_FailedToFormatKeyId);
     }
 

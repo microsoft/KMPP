@@ -31,13 +31,13 @@ int KeyIso_parse_pfx_engine_key_id(
     const char *keyId,
     int *pfxLength,
     unsigned char **pfxBytes,         // KeyIso_clear_free()
-    char **salt);                     // Optional, KeyIso_clear_free_string()
+    char **clientData);              // Base64 encoded string
 
 int KeyIso_format_pfx_engine_key_id(
     const uuid_t correlationId,
     int pfxLength,
     const unsigned char *pfxBytes,
-    const char *salt,
+    const char *clientData,
     char **keyId);                    // KeyIso_clear_free_string()
 
 // Returns BIO_s_mem().

@@ -67,7 +67,6 @@ else()
   message(FATAL_ERROR "Failed to extract OPENSSL_CONFIG_DIR from OpenSSL output")
 endif()
 
-
 # Add source files
 set(COMMON_SOURCE_FILES
     p_keyiso_base.c
@@ -75,12 +74,16 @@ set(COMMON_SOURCE_FILES
     p_keyiso_decoder.c
     p_keyiso_encoder.c
     p_keyiso_err.c
-    p_keyiso_keymgmt.c
+    p_keyiso_common_keymgmt.c
+    p_keyiso_rsa_keymgmt.c
     p_keyiso_rsa_cipher.c
     p_keyiso_rsa_common.c
     p_keyiso_rsa_signature.c
+    p_keyiso_ecc_keymgmt.c
+    p_keyiso_ecc_signature.c
+    p_keyiso_keyexch.c
     p_keyiso_store.c
-    p_keyiso_common.c
+    p_keyiso_utils.c
 )
 
 set(SOURCE_FILES
@@ -103,7 +106,6 @@ add_compile_options(
 )
 
 find_library(SYMCRYPT_LIB libsymcrypt.so REQUIRED)
-find_library(SYMCRYPT_PROVIDER_LIB symcryptprovider.so PATHS ${OPENSSL_MODULESDIR_DIR})
 
 # Function to create and configure a provider library
 function(add_provider_library name source_files)
@@ -120,22 +122,13 @@ function(add_provider_library name source_files)
     # Link libraries
     target_link_libraries(${name} kmpp_shared)
 
-    # Check if the library was found
-    if (SYMCRYPT_PROVIDER_LIB)
-      message(STATUS "symcryptprovider.so Found: ${SYMCRYPT_PROVIDER_LIB}")
-      target_link_libraries(${LIBRARY_NAME} ${SYMCRYPT_PROVIDER_LIB})      
-      target_compile_definitions(${LIBRARY_NAME} PRIVATE -DKEYS_IN_USE_AVAILABLE)
-    else()
-      message(STATUS "symcryptprovider.so not found in ${MODULESDIR}. Required for KeysInUse - Continuing without it.")      
-    endif()
-
     # Install libraries
     install(TARGETS ${name} 
-		    DESTINATION "${OPENSSL_MODULESDIR_DIR}"
-		    COMPONENT Runtime)
+    DESTINATION "${OPENSSL_MODULESDIR_DIR}"
+    COMPONENT Runtime)
     install(TARGETS ${name} 
-		    DESTINATION "${OPENSSL_MODULESDIR_DIR}"
-		    COMPONENT Client)
+    DESTINATION "${OPENSSL_MODULESDIR_DIR}"
+    COMPONENT Client)
 endfunction()
 
 ############## Creating shared objects ##############
@@ -148,7 +141,6 @@ if(KMPP_GENERAL_PURPOSE_TARGET)
     message(STATUS "Building default provider library: ${DEFAULT_LIBRARY_NAME}")
     add_provider_library(${DEFAULT_LIBRARY_NAME} "${SOURCE_FILES_DFLT}")
 endif()
-
 
 ############## Installing configuration files  ##############
 
@@ -186,4 +178,27 @@ if(KMPP_GENERAL_PURPOSE_TARGET)
     set(KMPP_DEFAULT_PROVIDER_CNF_SCRIPT_PATH "${KMPP_DEFAULT_PROVIDER_CNF_SCRIPT_PATH}" PARENT_SCOPE)
     message(STATUS "KMPP_DEFAULT_PROVIDER_CNF_SCRIPT_PATH: ${KMPP_DEFAULT_PROVIDER_CNF_SCRIPT_PATH}")
 
+    install(
+        FILES 
+            ${CMAKE_SOURCE_DIR}/scripts/configure_kmpp_default_prov.sh
+            ${CMAKE_SOURCE_DIR}/scripts/remove_kmpp_default_configuration.sh
+        DESTINATION ${KMPP_DEFAULT_PROVIDER_CNF_SCRIPT_PATH}
+        PERMISSIONS 
+            OWNER_READ OWNER_WRITE OWNER_EXECUTE
+            GROUP_READ GROUP_EXECUTE
+            WORLD_READ WORLD_EXECUTE
+        COMPONENT Runtime
+    )
+
+    install(
+        FILES 
+            ${CMAKE_SOURCE_DIR}/scripts/configure_kmpp_default_prov.sh
+            ${CMAKE_SOURCE_DIR}/scripts/remove_kmpp_default_configuration.sh
+        DESTINATION ${KMPP_DEFAULT_PROVIDER_CNF_SCRIPT_PATH}
+        PERMISSIONS 
+            OWNER_READ OWNER_WRITE OWNER_EXECUTE
+            GROUP_READ GROUP_EXECUTE
+            WORLD_READ WORLD_EXECUTE
+        COMPONENT Client
+    )
 endif() # KMPP_GENERAL_PURPOSE_TARGET

@@ -22,6 +22,7 @@ endif()
 
 target_link_libraries(${KMPP_USER_NAME}service
   kmpp_service_shared
+  dl
   )
 
 configure_file(

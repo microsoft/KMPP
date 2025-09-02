@@ -28,7 +28,7 @@
 
 // Provisioned heap size for TEE_Malloc() and friends 
 //#define TA_DATA_SIZE			(128 * 1024) //correlated to option 1 : Multi-instance TA
-#define TA_DATA_SIZE			(2048 * 1024) //correlated to option 2 : Single-instance TA, Muti-session, Keep Alive 
+#define TA_DATA_SIZE            (35 * 1024 * 1024) //correlated to option 2 : Single-instance TA, Muti-session, Keep Alive 
 
 // The gpd.ta.version property 
 #define TA_VERSION	"1.0"

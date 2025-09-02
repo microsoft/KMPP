@@ -15,7 +15,7 @@ IPC_REPLY_ST* KeyIso_client_adapter_send_open_ipc_and_key(KEYISO_KEY_CTX *keyCtx
 void KeyIso_client_adapter_key_open_completed(KEYISO_KEY_CTX *keyCtx); // Signal that key was opened and key contex data(key id) is initlized with a value(in case of success)
 bool KeyIso_client_adapter_is_key_already_opened(IPC_REPLY_ST *reply, int result);
 
-int KeyIso_client_adapter_init_keyCtx(KEYISO_KEY_CTX *keyCtx, int keyLength, const unsigned char *keyBytes, const char *salt);
+int KeyIso_client_adapter_init_keyCtx(KEYISO_KEY_CTX *keyCtx, int keyLength, const unsigned char *keyBytes, const char *clientData);
 void KeyIso_client_adapter_free_keyCtx(KEYISO_KEY_CTX *keyCtx);
 
 bool KeyIso_client_adapter_is_encoding();

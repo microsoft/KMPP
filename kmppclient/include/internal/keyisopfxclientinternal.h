@@ -49,7 +49,8 @@ int KeyIso_CLIENT_rsa_private_decrypt(
     const unsigned char *from,
     int tlen,
     unsigned char *to,
-    int padding);
+    int padding,
+    int labelLen);
 
 int KeyIso_CLIENT_rsa_sign(
     KEYISO_KEY_CTX *keyCtx,

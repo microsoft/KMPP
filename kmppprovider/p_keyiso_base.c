@@ -20,6 +20,7 @@
 #include "p_keyiso_err.h"
 
 extern KEYISO_CLIENT_CONFIG_ST g_config;
+extern KEYISO_KEYSINUSE_ST g_keysinuse;
 static int isRunning = 0;
 
 // Core functions
@@ -32,10 +33,13 @@ static OSSL_FUNC_core_vset_error_fn *keyIso_core_vset_error = NULL;
 // Dispatch functions
 extern const OSSL_DISPATCH keyIso_prov_rsa_keymgmt_funcs[];
 extern const OSSL_DISPATCH keyIso_prov_rsapss_keymgmt_funcs[];
-extern const OSSL_DISPATCH keyIso_prov_rsa_store_funcs[];
+extern const OSSL_DISPATCH keyIso_prov_ecc_keymgmt_funcs[];
+extern const OSSL_DISPATCH keyIso_prov_store_funcs[];
 extern const OSSL_DISPATCH keyIso_prov_rsa_signature_funcs[];
+extern const OSSL_DISPATCH keyIso_prov_ecdsa_signature_funcs[];
 extern const OSSL_DISPATCH keyIso_prov_rsa_cipher_funcs[];
 extern const OSSL_DISPATCH keyIso_prov_encoder_funcs[];
+extern const OSSL_DISPATCH keyIso_prov_ecdh_keyexch_funcs[];
 
 static const OSSL_ALGORITHM keyIso_prov_asym_cipher_algs[] = {
 	{ KEYISO_PROV_ASYM_CIPHER_NAME_RSA, KEYISO_PROV_PROPQ, keyIso_prov_rsa_cipher_funcs, "RSA Asym Cipher" },
@@ -44,24 +48,30 @@ static const OSSL_ALGORITHM keyIso_prov_asym_cipher_algs[] = {
 
 static const OSSL_ALGORITHM keyIso_prov_signature_algs[] = {
     { KEYISO_PROV_SIGN_NAME_RSA, KEYISO_PROV_PROPQ, keyIso_prov_rsa_signature_funcs, "RSA Signature" },
+    { KEYISO_PROV_SIGN_NAME_ECDSA, KEYISO_PROV_PROPQ, keyIso_prov_ecdsa_signature_funcs, "ECDSA Signature" },
     { NULL, NULL, NULL, NULL }
 };
 
 static const OSSL_ALGORITHM keyIso_prov_keymgmt_algs[] = {
     { KEYISO_PROV_KEYMGMT_NAME_RSA, KEYISO_PROV_PROPQ, keyIso_prov_rsa_keymgmt_funcs, "RSA Key management" },
     { KEYISO_PROV_KEYMGMT_NAME_RSA_PSS, KEYISO_PROV_PROPQ, keyIso_prov_rsapss_keymgmt_funcs, "RSA PSS Key management" },
-    //{ KEYISO_PROV_KEYMGMT_NAME_EC,  KEYISO_PROV_PROPQ, KeyIso_prov_ecc_keymgmt_functions },
+    { KEYISO_PROV_KEYMGMT_NAME_EC, KEYISO_PROV_PROPQ, keyIso_prov_ecc_keymgmt_funcs, "ECC Key management" },
     { NULL, NULL, NULL, NULL }
 };
 
 static const OSSL_ALGORITHM keyIso_prov_store_algs[] = {
-    { KEYISO_PROV_STORE_SCHEME, KEYISO_PROV_PROPQ, keyIso_prov_rsa_store_funcs, "KMPP store"},
+    { KEYISO_PROV_STORE_SCHEME, KEYISO_PROV_PROPQ, keyIso_prov_store_funcs, "KMPP store"},
     { NULL, NULL, NULL, NULL }
 };
 
 static const OSSL_ALGORITHM keyIso_prov_encoder_algs[] = {
     { KEYISO_NAME_RSA, KEYISO_PROV_PROPQ ",output=pem,structure=PrivateKeyInfo", keyIso_prov_encoder_funcs, "KMPP rsa2pem encoder" },
     { KEYISO_NAME_RSA_PSS, KEYISO_PROV_PROPQ ",output=pem,structure=PrivateKeyInfo", keyIso_prov_encoder_funcs, "KMPP rsapss2pem encoder" },
+    { NULL, NULL, NULL, NULL }
+};
+
+static const OSSL_ALGORITHM keyIso_prov_keyexch_algs[] = {
+    { KEYISO_NAME_ECDH, KEYISO_PROV_PROPQ, keyIso_prov_ecdh_keyexch_funcs, "ECDH Key Exchange" },
     { NULL, NULL, NULL, NULL }
 };
 
@@ -142,6 +152,9 @@ const OSSL_ALGORITHM* KeyIso_query_operation(ossl_unused void *provCtx, int oper
         case OSSL_OP_ASYM_CIPHER:
             return keyIso_prov_asym_cipher_algs;
 
+        case OSSL_OP_KEYEXCH:
+            return keyIso_prov_keyexch_algs;
+
         case OSSL_OP_DECODER:
             return keyIso_prov_decoder_algs;
 
@@ -183,6 +196,7 @@ void KeyIso_provider_teardown(KEYISO_PROV_PROVCTX *provCtx)
     KEYISOP_trace_log(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_PROVIDER_TITLE, "Start");
  
     ERR_unload_KMPP_strings();
+
 #ifndef KMPP_TELEMETRY_DISABLED
     KeyIso_check_all_metrics(KeyisoKeyOperation_Max, KeyisoCleanCounters_All);
 #endif
@@ -197,11 +211,6 @@ void KeyIso_provider_teardown(KEYISO_PROV_PROVCTX *provCtx)
 
     // Clean up the provider context
     KeyIso_free(provCtx);
-
-#ifdef KEYS_IN_USE_AVAILABLE    
-    // Calling keysInUse teardown function to free the all the monitored keys
-    //KeyInUseToDo: p_scossl_keysinuse_teardown();
-#endif
 }
 
 static int _init_core_func_from_dispatch(const OSSL_DISPATCH *fns)
@@ -252,7 +261,7 @@ static int _init_core_func_from_dispatch(const OSSL_DISPATCH *fns)
 static int _cleanup_kmpp_provider_init(int ret, KeyIsoErrReason reason, KEYISO_PROV_PROVCTX *pCtx)
 {
     if (ret != STATUS_OK) {
-        KEYISOP_trace_metric_error_para(NULL, 0, g_config.solutionType, KEYISOP_PROVIDER_TITLE, "", "Provider Init failed.", "Reason:%d", reason);
+        KEYISOP_trace_metric_error_para(NULL, 0, g_config.solutionType, g_keysinuse.isLibraryLoaded, KEYISOP_PROVIDER_TITLE, "", "Provider Init failed.", "Reason:%d", reason);
         KMPPerr(reason);
 
         if (pCtx != NULL) {
@@ -264,8 +273,8 @@ static int _cleanup_kmpp_provider_init(int ret, KeyIsoErrReason reason, KEYISO_P
         // Setting the counters threshold according to environment variables
         int countTh = 0;
         int timeTh = 0;
-        KeyIso_init_counter_th(&countTh, &timeTh, g_config.solutionType);
-        KEYISOP_trace_metric_para(NULL, 0, g_config.solutionType, KEYISOP_PROVIDER_TITLE, NULL, "Provider Init - counters and time thresholds: %d, %d", countTh, timeTh);
+        KeyIso_init_counter_th(&countTh, &timeTh, g_config.solutionType, g_keysinuse.isLibraryLoaded);
+        KEYISOP_trace_metric_para(NULL, 0, g_config.solutionType, g_keysinuse.isLibraryLoaded, KEYISOP_PROVIDER_TITLE, NULL, "Provider Init - counters and time thresholds: %d, %d", countTh, timeTh);
 #endif
     }
     
@@ -288,7 +297,12 @@ int KeyIso_kmpp_prov_init(const OSSL_CORE_HANDLE* handle, const OSSL_DISPATCH* i
 
     // Initialize error strings
     ERR_load_KMPP_strings();
-    
+
+    // Load KeysInUse library during provider initialization
+    if (!g_keysinuse.isLibraryLoaded) {
+        KeyIso_load_keysInUse_library();
+    }
+
     pCtx = KeyIso_zalloc(sizeof(KEYISO_PROV_PROVCTX));
     if (pCtx == NULL) {
         return _CLEANUP_KMPP_PROVIDER_INIT(STATUS_FAILED, KeyIsoErrReason_AllocFailure);
@@ -306,15 +320,6 @@ int KeyIso_kmpp_prov_init(const OSSL_CORE_HANDLE* handle, const OSSL_DISPATCH* i
     *provCtx = pCtx;
     *out = outTable;
     isRunning = 1;
-
-#ifdef KEYS_IN_USE_AVAILABLE    
-    /*
-    * Activating keysInUse functionality.
-    * The explicit call is needed in case SCOSSL is disabled but keysinuse is enabled.
-    * (se consume keysInUse functionality as SO)
-    */
-    //KeyInUseToDo: (might not be needed) p_scossl_keysinuse_p_scossl_keysinuse_init();
-#endif
 
     return _CLEANUP_KMPP_PROVIDER_INIT(STATUS_OK, KeyIsoErrReason_NoError);
 }
