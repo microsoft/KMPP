@@ -55,23 +55,22 @@ struct keyiso_input_header_st {
     uint8_t  correlationId[CORRELATION_ID_LEN];
 };
 
-// Each structure that is replied should include this header
-#define NUM_OF_HEADER_OUT_ELEMENTS 2
-typedef struct keyiso_output_header_st KEYISO_OUTPUT_HEADER_ST;
-struct keyiso_output_header_st {
+// Legacy header  - Used for symmetric key backwords compatibility scenario
+#define NUM_OF_LEGACY_HEADER_OUT_ELEMENTS 2
+typedef struct keyiso_output_legacy_header_st KEYISO_OUTPUT_LEGACY_HEADER_ST;
+struct keyiso_output_legacy_header_st {
     uint32_t command;  // IpcCommand enum
     uint32_t result; //both gdbus and OP-TEE results are 32 bits. Don't change that size.
 };
 
-#define NUM_OF_ENC_KEY_ELEMENTS 6
-typedef struct keyiso_encrypted_private_key_st KEYISO_ENCRYPTED_PRIV_KEY_ST;
-struct keyiso_encrypted_private_key_st {
-    uint32_t algVersion;
-    uint32_t saltLen;
-    uint32_t ivLen;
-    uint32_t hmacLen;
-    uint32_t encKeyLen;
-    uint8_t encryptedKeyBytes[];
+// Each structure that is replied should include this header
+#define NUM_OF_HEADER_OUT_ELEMENTS 4
+typedef struct keyiso_output_header_st KEYISO_OUTPUT_HEADER_ST;
+struct keyiso_output_header_st {
+    uint8_t version; 
+    uint16_t isolationSolution;
+    uint32_t command;  // IpcCommand enum
+    uint32_t result; //both gdbus and OP-TEE results are 32 bits.      
 };
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
@@ -80,12 +79,13 @@ struct keyiso_encrypted_private_key_st {
 //
 //////////////////////////////////////////////////////////////////////////////////////////////////
 
-#define NUM_OF_IMPORT_PRIV_KEY_OUT_ELEMENTS 3
+#define NUM_OF_IMPORT_PRIV_KEY_OUT_ELEMENTS 4
 typedef struct keyiso_import_private_key_output_st KEYISO_IMPORT_PRIV_KEY_OUT_ST;
 struct keyiso_import_private_key_output_st {
     KEYISO_OUTPUT_HEADER_ST headerSt;
-    int8_t  secretSalt[KEYISO_SECRET_SALT_STR_BASE64_LEN];
-    KEYISO_ENCRYPTED_PRIV_KEY_ST encKeySt;
+    uint32_t publicKeyLen; // The Asn.1 encoded public key
+    uint32_t opaqueEncryptedKeyLen;
+    uint8_t data[];
 };
 
 // Structures for IpcCommand_ImportRsaPrivateKey
@@ -114,19 +114,14 @@ struct keyiso_generate_rsa_key_pair_input_st {
     uint8_t keyUsage;   // encrypt/sign
 };
 
-#define NUM_OF_GENERATE_RSA_KEY_PAIR_OUT_ELEMENTS 10
+#define NUM_OF_GENERATE_RSA_KEY_PAIR_OUT_ELEMENTS 5
 typedef struct keyiso_generate_rsa_key_pair_output_st KEYISO_GEN_RSA_KEY_PAIR_OUT_ST;
 struct keyiso_generate_rsa_key_pair_output_st {
     KEYISO_OUTPUT_HEADER_ST headerSt;
-    int8_t   secretSalt[KEYISO_SECRET_SALT_STR_BASE64_LEN];
-    uint32_t algVersion;
-    uint32_t saltLen;
-    uint32_t ivLen;
-    uint32_t hmacLen;
-    uint32_t encKeyLen;
     uint32_t rsaModulusLen;      // n len (public key modulus length)
-    uint32_t rsaPublicExpLen;    // e len (public key exponent length)
-    uint8_t generateRsaKeyBytes[];
+    uint32_t rsaPublicExpLen;    // e len (public key exponent length
+    uint32_t opaqueEncryptedKeyLen;
+    uint8_t data[];
 };
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
@@ -139,29 +134,26 @@ struct keyiso_generate_ec_key_pair_input_st {
     uint8_t keyUsage;   // ecdsa/ecdh
 };
 
-#define NUM_OF_GENERATE_EC_KEY_PAIR_OUT_ELEMENTS 10
+#define NUM_OF_GENERATE_EC_KEY_PAIR_OUT_ELEMENTS 5
 typedef struct keyiso_generate_ec_key_pair_output_st KEYISO_GEN_EC_KEY_PAIR_OUT_ST;
 struct keyiso_generate_ec_key_pair_output_st {
     KEYISO_OUTPUT_HEADER_ST headerSt;
-    int8_t   secretSalt[KEYISO_SECRET_SALT_STR_BASE64_LEN];
-    uint32_t algVersion;
-    uint32_t saltLen;
-    uint32_t ivLen;
-    uint32_t hmacLen;
-    uint32_t encKeyLen;
-    uint32_t ecCurve;       // Curve group NID
+    uint32_t ecCurve;      // Curve group NID
     uint32_t ecPubKeyLen;  // Public EC key bytes len
-    uint8_t generateEcKeyBytes[];
+    uint32_t opaqueEncryptedKeyLen;
+    uint8_t data[];
 };
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
 // Structures for IpcCommand_OpenPrivateKey
-#define NUM_OF_OPEN_PRIV_KEY_IN_ELEMENTS 3
+#define NUM_OF_OPEN_PRIV_KEY_IN_ELEMENTS 5
 typedef struct keyiso_open_private_key_input_st KEYISO_OPEN_PRIV_KEY_IN_ST;
 struct keyiso_open_private_key_input_st {
     KEYISO_INPUT_HEADER_ST headerSt;
-    int8_t  secretSalt[KEYISO_SECRET_SALT_STR_BASE64_LEN];
-    KEYISO_ENCRYPTED_PRIV_KEY_ST encKeySt;    
+    KEYISO_CLIENT_METADATA_HEADER_ST clientDataHeader;  
+    uint32_t publicKeyLen; // The Asn.1 encoded public key
+    uint32_t opaqueEncryptedKeyLen;
+    uint8_t data[];
 };
 
 #define NUM_OF_OPEN_PRIV_KEY_OUT_ELEMENTS 2
@@ -213,24 +205,21 @@ struct keyiso_ecdsa_sign_output_st {
 };
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
-// Structures for IpcCommand_EcdsaSignWithAttacheKey
-#define NUM_OF_ECDSA_SIGN_WITH_ATTACHED_KEY_IN_ELEMENTS 11
+// Structures for IpcCommand_EcdsaSignWithAttachedKey
+#define NUM_OF_ECDSA_SIGN_WITH_ATTACHED_KEY_IN_ELEMENTS 8
 typedef struct keyiso_ecdsa_sign_with_attached_key_in_st KEYISO_ECDSA_SIGN_WITH_ATTACHED_KEY_IN_ST;
 struct keyiso_ecdsa_sign_with_attached_key_in_st {
     KEYISO_INPUT_HEADER_ST headerSt;
-    int8_t secretSalt[KEYISO_SECRET_SALT_STR_BASE64_LEN];
+    KEYISO_CLIENT_METADATA_HEADER_ST clientDataHeader;  
     // Encrypted Key
-    uint32_t algVersion;
-    uint32_t saltLen;
-    uint32_t ivLen;
-    uint32_t hmacLen;
-    uint32_t encKeyLen;
+    uint32_t publicKeyLen; // The Asn.1 encoded public key
+    uint32_t opaqueEncryptedKeyLen;
+
     // ECDSA Sign Parameters
     int32_t type;
     uint32_t sigLen;
     int32_t digestLen;
-    // Bytes
-    uint8_t bytes[];
+    uint8_t data[];
 };
 
 #define NUM_OF_ECDSA_SIGN_WITH_ATTACHED_KEY_OUT_ELEMENTS 4
@@ -257,23 +246,21 @@ struct keyiso_rsa_private_encrypt_decrypt_input_st {
 typedef struct keyiso_rsa_private_encrypt_decrypt_output_st KEYISO_RSA_PRIVATE_ENC_DEC_OUT_ST;
 struct keyiso_rsa_private_encrypt_decrypt_output_st {
     KEYISO_OUTPUT_HEADER_ST headerSt;
-    int32_t bytesLen;
+    uint32_t bytesLen;
     uint8_t toBytes[];
 };
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
 // Structures for IpcCommand_RsaPrivateEncryptDecryptWithAttachedKey
-#define NUM_OF_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY_IN_ELEMENTS 13
+#define NUM_OF_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY_IN_ELEMENTS 10
 typedef struct keyiso_rsa_private_encrypt_decrypt_with_attached_key_input_st KEYISO_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY_IN_ST;
 struct keyiso_rsa_private_encrypt_decrypt_with_attached_key_input_st {
     KEYISO_INPUT_HEADER_ST headerSt;
-    int8_t secretSalt[KEYISO_SECRET_SALT_STR_BASE64_LEN];
+    KEYISO_CLIENT_METADATA_HEADER_ST clientDataHeader;  
     // Encrypted Key
-    uint32_t algVersion;
-    uint32_t saltLen;
-    uint32_t ivLen;
-    uint32_t hmacLen;
-    uint32_t encKeyLen;
+    uint32_t publicKeyLen; // The Asn.1 encoded public key
+    uint32_t opaqueEncryptedKeyLen;
+
     // RSA Private Encrypt Decrypt Parameters
     int32_t decrypt;
     int32_t padding; 
@@ -281,10 +268,10 @@ struct keyiso_rsa_private_encrypt_decrypt_with_attached_key_input_st {
     int32_t fromBytesLen; 
     int32_t labelLen;
     // Bytes
-    uint8_t bytes[];
+    uint8_t data[];
 };
 
-#define NUM_OF_RSA_PRIVATE_ENC_DEC_WITH_ENC_KEY_OUT_ELEMENTS 4
+#define NUM_OF_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY_OUT_ELEMENTS 4
 typedef struct keyiso_rsa_private_encrypt_decrypt_with_attached_key_output_st KEYISO_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY_OUT_ST;
 struct keyiso_rsa_private_encrypt_decrypt_with_attached_key_output_st {
     KEYISO_OUTPUT_HEADER_ST headerSt;

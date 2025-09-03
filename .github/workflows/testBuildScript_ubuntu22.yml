@@ -20,4 +20,4 @@ jobs:
     
     - name: execute script
       run: |
-        sh scripts/build.sh
+        sh scripts/build.sh 22.04

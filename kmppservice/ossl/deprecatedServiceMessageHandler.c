@@ -71,7 +71,7 @@ EVP_PKEY* KeyIso_convert_kmpp_key_to_evp(
     return evpKey;
 }
 
-static void _cleanup_new_keyresources(char* salt, X509_SIG* p8, KEYISO_ENCRYPTED_PRIV_KEY_ST* enKeySt, PKMPP_KEY pKmppKey, const uuid_t correlationId) 
+static void _cleanup_new_keyresources(char* salt, X509_SIG* p8, KEYISO_ENCRYPTED_PRIV_KEY_ST* enKeySt, KEYISO_CLIENT_DATA_ST *clientData, PKMPP_KEY pKmppKey, const uuid_t correlationId) 
 {
     if (salt != NULL) {
         KeyIso_clear_free_string(salt);
@@ -82,13 +82,16 @@ static void _cleanup_new_keyresources(char* salt, X509_SIG* p8, KEYISO_ENCRYPTED
     if (enKeySt != NULL) {
         KeyIso_free(enKeySt); 
     }
+    if (clientData != NULL) {
+        KeyIso_free(clientData); 
+    }
     if (pKmppKey != NULL) {
         KeyIso_SERVER_free_key(correlationId, pKmppKey); // Free the KMPP key holding the SymCrypt key
     }
 }
 
 #define _CLEANUP_NEW_KEY_RESOURCES() \
-    _cleanup_new_keyresources(salt, p8, enKeySt, pKmppKey, correlationId)
+    _cleanup_new_keyresources(salt, p8, enKeySt, clientData, pKmppKey, correlationId)
 
 PKMPP_KEY KeyIso_get_kmpp_key_from_pfx_bytes(
     const unsigned char *correlationId,
@@ -112,8 +115,8 @@ PKMPP_KEY KeyIso_get_kmpp_key_from_pfx_bytes(
         return NULL;
     }
 
-    size_t inSaltLength = strnlen(inSalt, MAX_EXTRA_DATA_BASE64_LENGTH + 2); // +1 for n , +1 for null
-    if (inSaltLength >= (MAX_EXTRA_DATA_BASE64_LENGTH + 2)) {
+    size_t inSaltLength = strnlen(inSalt, MAX_CLIENT_DATA_BASE64_LENGTH + 2); // +1 for n , +1 for null
+    if (inSaltLength >= (MAX_CLIENT_DATA_BASE64_LENGTH + 2)) {
         KEYISOP_trace_log_error_para(correlationId, 0, title, "KeyIso_get_kmpp_key_from_pfx_bytes", "Salt exceeds maximum allowed length or is not null-terminated", "salt length: %d", inSaltLength);
         return NULL;
     }
@@ -126,13 +129,25 @@ PKMPP_KEY KeyIso_get_kmpp_key_from_pfx_bytes(
         char *salt = NULL;
         
         // 1. Extract the salt from the extra data
-        if (!KeyIso_get_salt_from_keyid(correlationId, KeyIsoSolutionType_process, inSalt, inSaltLength, &salt)) {
+        if (inSaltLength < 2) {
+            KEYISOP_trace_log_error(correlationId, 0, title, "Failed to determent key version", "Invalid salt format");
+            return NULL;
+        }
+        KEYISO_CLIENT_DATA_ST *clientData = NULL;
+        const char *clientDataStr = inSalt + 1; // Skip the version char
+        if (!KeyIso_get_client_data_from_key_bytes(correlationId, clientDataStr, &clientData)) {
             KEYISOP_trace_log_error(correlationId, 0, title, "Failed to determent key version", "Failed to get salt");
             _CLEANUP_NEW_KEY_RESOURCES();
             return NULL;
         }
 
-        // 2. Extract the encrypted private key from the PFX
+        if (clientData == NULL || !KeyIso_is_valid_keyid_header(correlationId, KeyIsoSolutionType_process, &clientData->keyIdHeader)) {
+            KEYISOP_trace_log_error(correlationId, 0, title, "Failed to determent key version", "Invalid client data metadata");
+            _CLEANUP_NEW_KEY_RESOURCES();
+            return NULL;
+        }
+
+        // 2. Extract the encrypted private key from the PFX 
         if (!KeyIso_pkcs12_parse_p8(correlationId, pfxBytesLength, pfxBytes, &p8, NULL, NULL)) {
             KEYISOP_trace_log_error(correlationId, 0, title, "Failed to determent key version", "KeyIso_pkcs12_parse_p8 failed");
             _CLEANUP_NEW_KEY_RESOURCES();
@@ -140,14 +155,22 @@ PKMPP_KEY KeyIso_get_kmpp_key_from_pfx_bytes(
         }
 
         // 3. Convert the P8 to a KMPP encrypted key
-        if (!KeyIso_create_enckey_from_p8(p8, &enKeySt)) {
+        unsigned int opaqueEncryptedKeyLen = 0;
+        unsigned char *opaqueEncryptedKey = NULL;
+        if (!KeyIso_create_enckey_from_p8(p8, &opaqueEncryptedKeyLen, &opaqueEncryptedKey)) {
             KEYISOP_trace_log_error(correlationId, 0, title, "Failed to determent key version", "KeyIso_create_enckey_from_p8 failed");
             _CLEANUP_NEW_KEY_RESOURCES();
             return NULL;
         }
+        enKeySt = (KEYISO_ENCRYPTED_PRIV_KEY_ST *)opaqueEncryptedKey;
 
         // 4. Open the private key holding the SymCrypt key
-        if (!KeyIso_SERVER_open_private_key(correlationId, salt, enKeySt, &pKmppKey)) {
+        KEYISO_CLIENT_METADATA_HEADER_ST  metadataHeader;
+        memset(&metadataHeader, 0, sizeof(metadataHeader));
+        metadataHeader.version = clientData->keyIdHeader.keyServiceVersion; // The version of the service that created the key
+        metadataHeader.isolationSolution = clientData->keyIdHeader.isolationSolution; // The isolation solution of the service that created the key
+
+        if (!KeyIso_SERVER_open_private_key(correlationId, &metadataHeader, enKeySt, &pKmppKey)) {
            KEYISOP_trace_log_error(correlationId, 0, title, "Failed to open private key", "KeyIso_SERVER_open_private_key failed");
            _CLEANUP_NEW_KEY_RESOURCES();
            return NULL;
@@ -214,7 +237,7 @@ gboolean KeyIso_on_handle_import_pfx(
         memset(correlationId, 0, sizeof(correlationId));
     }
 
-    KEYISOP_trace_log_para(correlationId, 0, title, "Start", "sender: %s version: %d arg_keyisoFlags: %x", senderName, arg_version, arg_keyisoFlags);
+    KEYISOP_trace_log_para(correlationId, KEYISOP_TRACELOG_VERBOSE_FLAG, title, "Start", "sender: %s version: %d arg_keyisoFlags: %x", senderName, arg_version, arg_keyisoFlags);
 
     inPfxBytes = (guchar *) g_variant_get_fixed_array(arg_inPfxBytes,
         &inPfxBytesLength,
@@ -280,7 +303,7 @@ end:
             KEYISOP_trace_log_error(correlationId, 0, title, "Complete",
                 "Import succeeded with certificate errors");
         } else {
-            KEYISOP_trace_log(correlationId, 0, title, "Complete");
+            KEYISOP_trace_log(correlationId, KEYISOP_TRACELOG_VERBOSE_FLAG, title, "Complete");
         }
         // The following does a g_variant_unref(outVariant);
         gdbus_kmpp_complete_import_pfx(interface, invocation, outVariant);
@@ -333,7 +356,7 @@ gboolean KeyIso_on_handle_create_self_sign_pfx(
         memset(correlationId, 0, sizeof(correlationId));
     }
 
-    KEYISOP_trace_log_para(correlationId, 0, title, "Start", "sender: %s version: %d", senderName, arg_version);
+    KEYISOP_trace_log_para(correlationId, KEYISOP_TRACELOG_VERBOSE_FLAG, title, "Start", "sender: %s version: %d", senderName, arg_version);
 
     if (!KeyIso_SERVER_create_self_sign_pfx(
             correlationId,
@@ -379,7 +402,7 @@ end:
     KeyIso_clear_free_string(outPfxSalt);
 
     if (ret != 0) {
-        KEYISOP_trace_log(correlationId, 0, title, "Complete");
+        KEYISOP_trace_log(correlationId, KEYISOP_TRACELOG_VERBOSE_FLAG, title, "Complete");
         // The following does a g_variant_unref(outVariant);
         gdbus_kmpp_complete_create_self_sign_pfx(interface, invocation, outVariant);
     } else {
@@ -456,7 +479,7 @@ gboolean KeyIso_on_handle_replace_pfx_certs(
         goto err;
     }
 
-    KEYISOP_trace_log_para(correlationId, 0, title, "Start", "sender: %s version: %d", senderName, arg_version);
+    KEYISOP_trace_log_para(correlationId, KEYISOP_TRACELOG_VERBOSE_FLAG, title, "Start", "sender: %s version: %d", senderName, arg_version);
 
     if (!KeyIso_SERVER_replace_pfx_certs(
             correlationId,
@@ -506,7 +529,7 @@ end:
     KeyIso_clear_free_string(outPfxSalt);
 
     if (ret != 0) {
-        KEYISOP_trace_log(correlationId, 0, title, "Complete");
+        KEYISOP_trace_log(correlationId, KEYISOP_TRACELOG_VERBOSE_FLAG, title, "Complete");
         // The following does a g_variant_unref(outVariant);
         gdbus_kmpp_complete_replace_pfx_certs(interface, invocation, outVariant);
     } else {

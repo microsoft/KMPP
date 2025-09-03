@@ -10,56 +10,6 @@
 
 #define RSAKEY_FIPS_MIN_BITSIZE_MODULUS 1024
 
-// OpenSSL NID mappings (Only reroute NIST Prime curves to SymCrypt for now)
-#define KMPP_ECC_CURVE_NISTP192_NID     409     // NID_X9_62_prime192v1
-#define KMPP_ECC_CURVE_NISTP256_NID     415     // NID_X9_62_prime256v1
-#define KMPP_ECC_CURVE_NISTP224_NID     713     // NID_secp224r1
-#define KMPP_ECC_CURVE_NISTP384_NID     715     // NID_secp384r1
-#define KMPP_ECC_CURVE_NISTP521_NID     716     // NID_secp521r1
-
-static PSYMCRYPT_ECURVE _curve_P192 = NULL;
-static PSYMCRYPT_ECURVE _curve_P224 = NULL;
-static PSYMCRYPT_ECURVE _curve_P256 = NULL;
-static PSYMCRYPT_ECURVE _curve_P384 = NULL;
-static PSYMCRYPT_ECURVE _curve_P521 = NULL;
-
-int KEYISO_EC_init_static()
-{
-    if (((_curve_P192 = SymCryptEcurveAllocate(SymCryptEcurveParamsNistP192, 0)) == NULL) ||
-        ((_curve_P224 = SymCryptEcurveAllocate(SymCryptEcurveParamsNistP224, 0)) == NULL) ||
-        ((_curve_P256 = SymCryptEcurveAllocate(SymCryptEcurveParamsNistP256, 0)) == NULL) ||
-        ((_curve_P384 = SymCryptEcurveAllocate(SymCryptEcurveParamsNistP384, 0)) == NULL) ||
-        ((_curve_P521 = SymCryptEcurveAllocate(SymCryptEcurveParamsNistP521, 0)) == NULL))
-    {
-        return STATUS_FAILED;
-    }
-    return STATUS_OK;
-}
-
-void KEYISO_EC_free_static()
-{
-    if (_curve_P192) {
-        SymCryptEcurveFree(_curve_P192);
-        _curve_P192 = NULL;
-    }
-    if (_curve_P224) {
-        SymCryptEcurveFree(_curve_P224);
-        _curve_P224 = NULL;
-    }
-    if (_curve_P256) {
-        SymCryptEcurveFree(_curve_P256);
-        _curve_P256 = NULL;
-    }
-    if (_curve_P384) {
-        SymCryptEcurveFree(_curve_P384);
-        _curve_P384 = NULL;
-    }
-    if (_curve_P521) {
-        SymCryptEcurveFree(_curve_P521);
-        _curve_P521 = NULL;
-    }
-}
-
 /////////////////////////////////////////////////////
 ///////////// Internal Key Gen methods //////////////
 /////////////////////////////////////////////////////
@@ -117,62 +67,6 @@ int KeyIso_rsa_key_generate(
 
     *pGeneratedKey = pKey;
     return STATUS_OK;
-}
-
-PSYMCRYPT_ECURVE KeyIso_get_curve_by_nid(
-    const uuid_t correlationId,
-    uint32_t groupNid) 
-{
-    PSYMCRYPT_ECURVE pCurve = NULL;
-    
-    switch( groupNid )
-    {
-        case KMPP_ECC_CURVE_NISTP192_NID:
-            pCurve = _curve_P192;
-            break;
-        case KMPP_ECC_CURVE_NISTP256_NID:
-            pCurve = _curve_P256;
-            break;
-        case KMPP_ECC_CURVE_NISTP224_NID:
-            pCurve =_curve_P224;
-            break;
-        case KMPP_ECC_CURVE_NISTP384_NID:
-            pCurve = _curve_P384;
-            break;
-        case KMPP_ECC_CURVE_NISTP521_NID:
-            pCurve = _curve_P521;
-            break;
-        default:
-            KEYISOP_trace_log_error_para(correlationId, 0, KEYISOP_SERVICE_TITLE, "ERROR",  "SymCrypt engine does not yet support this group", "(nid %d)", groupNid);    
-    }
-    
-    return pCurve;
-}
-
-// Get nid by symcrypt curve
-int32_t KeyIso_get_curve_nid_from_symcrypt_curve(
-    const uuid_t correlationId,
-    PCSYMCRYPT_ECURVE pCurve)
-{
-    if (pCurve == NULL) {
-        return -1; // Invalid curve
-    }
-
-    if (SymCryptEcurveIsSame(pCurve, _curve_P192)) {
-        return KMPP_ECC_CURVE_NISTP192_NID;
-    } else if (SymCryptEcurveIsSame(pCurve, _curve_P224)) {
-        return KMPP_ECC_CURVE_NISTP224_NID;
-    } else if (SymCryptEcurveIsSame(pCurve, _curve_P256)) {
-        return KMPP_ECC_CURVE_NISTP256_NID;
-    } else if (SymCryptEcurveIsSame(pCurve, _curve_P384)) {
-        return KMPP_ECC_CURVE_NISTP384_NID;
-    } else if (SymCryptEcurveIsSame(pCurve, _curve_P521)) {
-        return KMPP_ECC_CURVE_NISTP521_NID;
-    }
-
-    KEYISOP_trace_log_error(correlationId, 0, KEYISOP_SERVICE_TITLE, "KeyIso_get_curve_nid_from_symcrypt_curve", "Unsupported curve");
-    // Unsupported curve
-    return -1;
 }
 
 static int _ec_key_generate_failure(PSYMCRYPT_ECKEY pKey)

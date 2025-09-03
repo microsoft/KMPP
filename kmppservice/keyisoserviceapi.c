@@ -121,65 +121,75 @@ static int _cleanup_import_private_key(
     const char *loc,
     const char *err,
     const uuid_t correlationId,
-    char *password,
-    char *secretSalt,
-    unsigned char *salt,
+    unsigned char *secretId,
+    unsigned int secretIdLen,
+    unsigned char *secretSalt,
+    unsigned int secretSaltLen,
     unsigned char *iv,
+    unsigned int ivLen,
     unsigned char *hmac,
-    unsigned char *bufToEncrypt,
-    unsigned int bufToEncryptLen,
-    unsigned char *encryptedBuf,
+    unsigned int hmacLen,
+    unsigned char *pToEncrypt,
+    unsigned int paddedKeyLen,
+    unsigned char *pEncrypted,
     KEYISO_ENCRYPTED_PRIV_KEY_ST *pEncKeySt)
 {
     if (ret != STATUS_OK) {
         KEYISOP_trace_log_error(correlationId, 0, KEYISOP_IMPORT_KEY_TITLE, loc, err);
-        KeyIso_clear_free_string(secretSalt);
         KeyIso_free(pEncKeySt);
+        pEncKeySt = NULL;
     } else {
         KEYISOP_trace_log(correlationId, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_IMPORT_KEY_TITLE, loc);
     }
-    KeyIso_cleanse(salt, sizeof(salt));
-    KeyIso_cleanse(iv, sizeof(iv));
-    KeyIso_cleanse(hmac, sizeof(hmac));
-    KeyIso_clear_free(bufToEncrypt, bufToEncryptLen);
-    KeyIso_free(encryptedBuf);
-    KeyIso_clear_free_string(password);
+
+    // Cleanse sensitive data
+    KeyIso_cleanse(secretId, secretIdLen);
+    KeyIso_cleanse(secretSalt, secretSaltLen);
+    KeyIso_cleanse(iv, ivLen);
+    KeyIso_cleanse(hmac, hmacLen);
+    KeyIso_clear_free(pToEncrypt, paddedKeyLen);
+    KeyIso_free(pEncrypted);
+
     return ret;
 }
+#define _CLEANUP_IMPORT_PRIVATE_KEY(res, loc, err) \
+    _cleanup_import_private_key(res, loc, err, correlationId, secretId, secretIdLen, secretSalt, \
+         secretSaltLen, iv, ivLen, hmac, hmacLen, pToEncrypt, paddedKeyLen, pEncrypted, pEncKeySt)
 
 int KeyIso_SERVER_import_private_key( 
     const uuid_t correlationId,
     int keyType,
     const void *inKey,       // KEYISO_RSA_PKEY_ST/KEYISO_EC_PKEY_ST 
-    void **outEncKey,        // KEYISO_ENCRYPTED_PRIV_KEY_ST
-    char **outSalt)
+    void **outEncKey)        // KEYISO_ENCRYPTED_PRIV_KEY_ST
 {
-    if (!inKey || !outEncKey || !outSalt) {
+    if (!inKey || !outEncKey) {
         KEYISOP_trace_log_error(correlationId, 0, KEYISOP_IMPORT_KEY_TITLE, "Invalid argument", "Null parameter");
         return STATUS_FAILED;
     }
     *outEncKey = NULL;
-    *outSalt = NULL;
 
     int ret = STATUS_FAILED;
-    int index = 0;
 
     size_t inKeyLen = 0;
-    size_t saltLen = 0;
     size_t ivLen = 0;
     size_t hmacLen = 0;
     size_t keyLen = 0;
-    size_t encKeyLen = 0;
+    uint32_t totalDynamicKeyLen = 0;
     size_t structSize = 0;
     unsigned int paddedKeyLen = 0;
     AlgorithmVersion algVersion = AlgorithmVersion_Current;
 
-    unsigned char salt[KEYISO_KDF_SALT_LEN]; // KeyIso_cleanse() need to be invoked before exiting the function
-    unsigned char iv[KMPP_AES_BLOCK_SIZE]; // KeyIso_cleanse() need to be invoked before exiting the function
-    unsigned char hmac[KMPP_HMAC_SHA256_KEY_SIZE]; // KeyIso_cleanse() need to be invoked before exiting the function
+    unsigned char iv[KMPP_AES_BLOCK_SIZE] = {0};            // KeyIso_cleanse() need to be invoked before exiting the function
+    unsigned char hmac[KMPP_HMAC_SHA256_KEY_SIZE] = {0};    // KeyIso_cleanse() need to be invoked before exiting the function
+    unsigned char secretSalt[KMPP_SALT_SHA256_SIZE] = {0};  // KeyIso_cleanse() need to be invoked before exiting the function
+    unsigned char secretId[KMPP_MAX_SECRET_ID_SIZE] = {0};    // KeyIso_cleanse() need to be invoked before exiting the function
 
-    char *secretSalt = NULL;
-    char *password = NULL;
+
+    size_t secretSaltLen = sizeof(secretSalt);
+    // The secret Id length will be set differently according to the isolation solution: 
+    // sizeof(uuid_t) in process based used as GUId
+    // and 32 Bytes in TA, used as extra salt for deriving the machine secret
+    uint32_t secretIdLen = 0;
     
     unsigned char *pToEncrypt = NULL; // KeyIso_clear_free() should be used to free
     unsigned char *pEncrypted = NULL;
@@ -187,7 +197,6 @@ int KeyIso_SERVER_import_private_key(
     KmppKeyType type = KmppKeyType_end;
     KEYISO_ENCRYPTED_PRIV_KEY_ST* pEncKeySt = NULL;
 
-    saltLen = sizeof(salt);
     ivLen = sizeof(iv);
     hmacLen = sizeof(hmac);
     type = KeyIso_evp_pkey_id_to_KmppKeyType(correlationId, keyType);
@@ -196,109 +205,108 @@ int KeyIso_SERVER_import_private_key(
 
     // We want to prevent the import of a key whose use is not supported
     if (STATUS_OK != _is_valid_private_key(correlationId, type, inKey))
-        return _cleanup_import_private_key(STATUS_FAILED, "inKey", "Invalid key", 
-            correlationId, password, secretSalt, salt, iv, hmac, pToEncrypt, 0, pEncrypted, pEncKeySt);
+        return _CLEANUP_IMPORT_PRIVATE_KEY(STATUS_FAILED, "inKey", "Invalid key");
 
     inKeyLen = KeyIso_get_pkey_bytes_len(type, inKey);
-    if (!inKeyLen)
-        return _cleanup_import_private_key(STATUS_FAILED, "len", "Failed to get key length", 
-            correlationId, password, secretSalt, salt, iv, hmac, pToEncrypt, 0, pEncrypted, pEncKeySt);
+    if (!inKeyLen) {
+        return _CLEANUP_IMPORT_PRIVATE_KEY(STATUS_FAILED, "len", "Failed to get key length");
+    }
     
     keyLen = sizeof(KmppKeyType) + inKeyLen;  // adding one more byte for key type
     
     // Get PKCS #7 block padding size
-    if (KeyIso_padding_pkcs7_add(
+    ret = KeyIso_padding_pkcs7_add(
         correlationId,
         NULL, // When sending data as null it will return only the padding size
         keyLen,
         NULL,
-        &paddedKeyLen) != STATUS_OK) {
-            return _cleanup_import_private_key(ret, "KeyIso_padding_pkcs7_add", " padding size Failed", 
-                correlationId, password, secretSalt, salt, iv, hmac, pToEncrypt, 0,  pEncrypted, pEncKeySt);
+        &paddedKeyLen);
+    if (ret != STATUS_OK) {
+        return _CLEANUP_IMPORT_PRIVATE_KEY(ret, "KeyIso_padding_pkcs7_add", " padding size Failed");
     }
 
     pToEncrypt = (unsigned char *) KeyIso_zalloc(paddedKeyLen);
     pEncrypted = (unsigned char *) KeyIso_zalloc(paddedKeyLen);
-    if (!pToEncrypt || !pEncrypted)
-        return _cleanup_import_private_key(STATUS_FAILED, "Memory allocation", "Failed", 
-            correlationId, password, secretSalt, salt, iv, hmac, pToEncrypt, paddedKeyLen, pEncrypted, pEncKeySt);
+    if (!pToEncrypt || !pEncrypted) {
+        return _CLEANUP_IMPORT_PRIVATE_KEY(STATUS_FAILED, "Memory allocation", "Failed");
+    }
 
     // Concatenating key type to the beginning of the private key buffer
     memcpy(pToEncrypt, &type, sizeof(KmppKeyType));
     memcpy(pToEncrypt + sizeof(KmppKeyType), inKey, inKeyLen);
 
-    // Generating salted password
-    if (!KeyIso_generate_salt(correlationId, &secretSalt))
-        return _cleanup_import_private_key(STATUS_FAILED, "Salt generation", "Failed", 
-            correlationId, password, secretSalt, salt, iv, hmac, pToEncrypt, paddedKeyLen, pEncrypted, pEncKeySt);
-    if (!KeyIso_generate_password_from_salt(correlationId, secretSalt, &password))
-        return _cleanup_import_private_key(STATUS_FAILED, "Password generation", "Failed", 
-            correlationId, password, secretSalt, salt, iv, hmac, pToEncrypt, paddedKeyLen, pEncrypted, pEncKeySt);
-
-    // Initializing PBE params
-    ret = KeyIso_rand_bytes(salt, saltLen);
-    if (ret != STATUS_OK)
-        return _cleanup_import_private_key(ret, "salt initialization", "Failed", 
-            correlationId, password, secretSalt, salt, iv, hmac, pToEncrypt, paddedKeyLen, pEncrypted, pEncKeySt);
-
     // PKCS #7 block padding
-    if (KeyIso_padding_pkcs7_add(
+    ret = KeyIso_padding_pkcs7_add(
         correlationId,
         pToEncrypt,
         keyLen,
         pToEncrypt,
-        &paddedKeyLen) != STATUS_OK) {
-            return _cleanup_import_private_key(ret, "KeyIso_padding_pkcs7_add", "Failed", 
-                correlationId, password, secretSalt, salt, iv, hmac, pToEncrypt, paddedKeyLen, pEncrypted, pEncKeySt);
+        &paddedKeyLen);
+    if (ret != STATUS_OK) {
+        return _CLEANUP_IMPORT_PRIVATE_KEY(ret, "KeyIso_padding_pkcs7_add", "Failed");
     }
 
-    // PKCS #5 password-based encryption + HMAC calculation
-    ret = KeyIso_symcrypt_pbe_encrypt_hmac(
+    // Deriving a 512-bit key from the current machine secret and a random salt using KDF (SP800-108)
+    // Encrypting the private key with the the first 256 bits of the derived key using AES-256-CBC
+    // and calculating HMAC using the second 256 bits of the derived key.
+
+    ret = KeyIso_symcrypt_kdf_encrypt_hmac(
         correlationId,
-        KEYISOP_IMPORT_KEY_TITLE,
         algVersion,
-        (unsigned char *) password,
-        (password) ? strlen(password) : 0,
-        salt,
-        saltLen,
-        iv,
-        ivLen,
-        pToEncrypt,
-        pEncrypted,
-        paddedKeyLen,
-        hmac,
-        hmacLen);
-    if (ret != STATUS_OK)
-        return _cleanup_import_private_key(ret, "PBE", "Failed", 
-            correlationId, password, secretSalt, salt, iv, hmac, pToEncrypt, paddedKeyLen, pEncrypted, pEncKeySt);
+        secretId, 
+        &secretIdLen,           
+        secretSalt,    
+        secretSaltLen,           
+        iv,          
+        ivLen,     
+        pToEncrypt,      
+        pEncrypted,  
+        paddedKeyLen,      
+        hmac,               
+        hmacLen);  
+    if (ret != STATUS_OK) {
+        return _CLEANUP_IMPORT_PRIVATE_KEY(ret, "KeyIso_symcrypt_kdf_encrypt_hmac", "Failed to encrypt private key");
+    }
 
     // Creating encrypted key
-    encKeyLen = saltLen + ivLen + hmacLen + paddedKeyLen;
-    structSize = GET_DYNAMIC_STRUCT_SIZE(KEYISO_ENCRYPTED_PRIV_KEY_ST, encKeyLen);
+    totalDynamicKeyLen = 0;
+    ret = KeyIso_get_enc_key_bytes_len_params(correlationId, secretSaltLen, ivLen, hmacLen, paddedKeyLen, secretIdLen, &totalDynamicKeyLen);
+    if (ret != STATUS_OK) {
+        return _CLEANUP_IMPORT_PRIVATE_KEY(ret, "KeyIso_get_enc_key_bytes_len_params", "Failed to get encrypted key length");
+    }
+
+    structSize = GET_DYNAMIC_STRUCT_SIZE(KEYISO_ENCRYPTED_PRIV_KEY_ST, totalDynamicKeyLen);
     pEncKeySt = (KEYISO_ENCRYPTED_PRIV_KEY_ST *) KeyIso_zalloc(structSize);
-    if (!pEncKeySt)
-        return _cleanup_import_private_key(STATUS_FAILED, "enckey", "Memory allocation failed", 
-            correlationId, password, secretSalt, salt, iv, hmac, pToEncrypt, paddedKeyLen, pEncrypted, pEncKeySt);
+    if (!pEncKeySt) {
+        return _CLEANUP_IMPORT_PRIVATE_KEY(STATUS_FAILED, "enckey", "Memory allocation failed");
+    }
 
     // Any change (without backward compatibility) in the encryption algorithm above requires to update the version.
     pEncKeySt->algVersion = algVersion;
-    pEncKeySt->saltLen = saltLen;
+    pEncKeySt->secretSaltLen = secretSaltLen;
     pEncKeySt->ivLen = ivLen;
     pEncKeySt->hmacLen = hmacLen;
     pEncKeySt->encKeyLen = paddedKeyLen;
-
-    memcpy(&pEncKeySt->encryptedKeyBytes[index], salt, saltLen);
-    index += saltLen;
+    pEncKeySt->secretIdLen = secretIdLen;
+    
+    uint32_t index = 0;
+    memcpy(&pEncKeySt->encryptedKeyBytes[index], secretSalt, secretSaltLen);
+    index += secretSaltLen;
     memcpy(&pEncKeySt->encryptedKeyBytes[index], iv, ivLen);
     index += ivLen;
     memcpy(&pEncKeySt->encryptedKeyBytes[index], hmac, hmacLen);
     index += hmacLen;
+    memcpy(&pEncKeySt->encryptedKeyBytes[index], secretId, secretIdLen);
+    index += secretIdLen;
     memcpy(&pEncKeySt->encryptedKeyBytes[index], pEncrypted, paddedKeyLen);
+    index += paddedKeyLen;
+    if (index != totalDynamicKeyLen) {
+        return _CLEANUP_IMPORT_PRIVATE_KEY(STATUS_FAILED, "Invalid argument", "Encrypted key length mismatch"); 
+    }
 
-    *outSalt = secretSalt;
-    *outEncKey = (unsigned char *) pEncKeySt;
+    *outEncKey = pEncKeySt;
 
-    return _cleanup_import_private_key(STATUS_OK, "Complete- Success", "", correlationId, password, secretSalt, salt, iv, hmac, pToEncrypt, paddedKeyLen, pEncrypted, pEncKeySt);
+    return _CLEANUP_IMPORT_PRIVATE_KEY(STATUS_OK, "Complete- Success", "");
 }
 
 static int _cleanup_generate_rsa_key_pair(
@@ -309,8 +317,7 @@ static int _cleanup_generate_rsa_key_pair(
     PSYMCRYPT_RSAKEY pkeyPtr, 
     KEYISO_RSA_PUBLIC_KEY_ST *pubKeyPtr, 
     KEYISO_RSA_PKEY_ST *pPkeySt, // KeyIso_clear_free() should be used to free
-    size_t pkeyStSize,
-    char *salt)
+    size_t pkeyStSize)
 {
     if (pkeyPtr) {
         SymCryptRsakeyFree(pkeyPtr);
@@ -319,7 +326,6 @@ static int _cleanup_generate_rsa_key_pair(
     KeyIso_clear_free(pPkeySt, pkeyStSize);
     if (status != STATUS_OK) {
         KeyIso_free(pubKeyPtr);
-        KeyIso_clear_free_string(salt);
         KEYISOP_trace_log_error(correlationId, 0, KEYISOP_GEN_KEY_TITLE, loc, error);
     } else {
         KEYISOP_trace_log(correlationId, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_GEN_KEY_TITLE, loc);
@@ -332,12 +338,11 @@ int KeyIso_SERVER_generate_rsa_key_pair(
     unsigned int keyBits,
     unsigned int keyUsage,
     KEYISO_RSA_PUBLIC_KEY_ST **outPubKey,          
-    void **outEncryptedPkey,      // KEYISO_ENCRYPTED_PRIV_KEY_ST  
-    char **outSalt)
+    void **outEncryptedPkey)      // KEYISO_ENCRYPTED_PRIV_KEY_ST  
 {
     KEYISOP_trace_log(correlationId, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_GEN_KEY_TITLE, "Start"); 
 
-    if (outPubKey == NULL || outEncryptedPkey == NULL || outSalt == NULL) 
+    if (outPubKey == NULL || outEncryptedPkey == NULL) 
         return _cleanup_generate_rsa_key_pair(correlationId,
                                               "Invalid argument",
                                               "Failed",
@@ -345,11 +350,17 @@ int KeyIso_SERVER_generate_rsa_key_pair(
                                                NULL,
                                                NULL,
                                                NULL,
-                                               0,
-                                               NULL);
+                                               0);
     
     if (keyBits > KMPP_OPENSSL_RSA_MAX_MODULUS_BITS || keyBits < KMPP_RSA_MIN_MODULUS_BITS) {    
-        return _cleanup_generate_rsa_key_pair(correlationId, "Invalid argument", "Failed", STATUS_FAILED, NULL, NULL, NULL, 0,  NULL); 
+        return _cleanup_generate_rsa_key_pair(correlationId,
+                                              "Invalid argument",
+                                              "Failed",
+                                              STATUS_FAILED,
+                                              NULL,
+                                              NULL,
+                                              NULL,
+                                              0); 
     }    
     
     int ret = STATUS_FAILED;
@@ -357,11 +368,9 @@ int KeyIso_SERVER_generate_rsa_key_pair(
     KEYISO_RSA_PKEY_ST *pPkeySt = NULL;
     KEYISO_RSA_PUBLIC_KEY_ST *pPubKeySt = NULL;
     void *encryptedPkey = NULL;
-    char *salt = NULL;
     
     *outPubKey = NULL;
     *outEncryptedPkey = NULL;
-    *outSalt = NULL;
 
     // Generating RSA Key 
     ret = KeyIso_rsa_key_generate(correlationId, keyBits, keyUsage, &rsaKey);
@@ -373,8 +382,7 @@ int KeyIso_SERVER_generate_rsa_key_pair(
                                                rsaKey,
                                                NULL,
                                                NULL,
-                                               0,
-                                               salt);
+                                               0);
 
     pPubKeySt = KeyIso_export_rsa_public_key_from_symcrypt(correlationId, rsaKey);
     if (!pPubKeySt)
@@ -385,8 +393,7 @@ int KeyIso_SERVER_generate_rsa_key_pair(
                                               rsaKey,
                                               pPubKeySt,
                                               NULL,
-                                              0,
-                                              salt); 
+                                              0); 
     size_t keySize = 0;
     pPkeySt = KeyIso_export_rsa_pkey_from_symcrypt(correlationId, rsaKey, &keySize);
     if(!pPkeySt) 
@@ -397,10 +404,9 @@ int KeyIso_SERVER_generate_rsa_key_pair(
                                               rsaKey,
                                               pPubKeySt,
                                               pPkeySt,
-                                              keySize,
-                                              salt); 
+                                              keySize); 
     // Importing the generated key
-    ret = KeyIso_SERVER_import_private_key(correlationId, KMPP_EVP_PKEY_RSA_NID , pPkeySt, &encryptedPkey, &salt);
+    ret = KeyIso_SERVER_import_private_key(correlationId, KMPP_EVP_PKEY_RSA_NID , pPkeySt, &encryptedPkey);
     if (ret != STATUS_OK)
         return _cleanup_generate_rsa_key_pair(correlationId,
                                               "KeyIso_SERVER_import_private_key",
@@ -409,11 +415,9 @@ int KeyIso_SERVER_generate_rsa_key_pair(
                                                rsaKey,
                                                pPubKeySt,
                                                pPkeySt,
-                                               keySize,
-                                               salt);
+                                               keySize);
 
     // Setting output parameters
-    *outSalt = salt;
     *outPubKey = pPubKeySt;
     *outEncryptedPkey = encryptedPkey;
 
@@ -424,8 +428,7 @@ int KeyIso_SERVER_generate_rsa_key_pair(
                                           rsaKey,
                                           NULL,
                                           pPkeySt,
-                                          keySize,
-                                          salt);
+                                          keySize);
 }
 
 static int _cleanup_generate_ec_key_pair(
@@ -437,8 +440,7 @@ static int _cleanup_generate_ec_key_pair(
     KEYISO_EC_PUBLIC_KEY_ST *pubKeyPtr, 
     void *encryptedPkey, 
     void *pPkeySt, // KeyIso_clear_free() should be used to free
-    size_t pkeyStSize,
-    char *salt)
+    size_t pkeyStSize)
 {
     if (pkeyPtr) 
         SymCryptEckeyFree(pkeyPtr);
@@ -447,7 +449,6 @@ static int _cleanup_generate_ec_key_pair(
     if (status != STATUS_OK) {
         KeyIso_free(pubKeyPtr);
         KeyIso_free(encryptedPkey);
-        KeyIso_clear_free_string(salt);
         KEYISOP_trace_log_error(correlationId, 0, KEYISOP_GEN_KEY_TITLE, loc, err);
     } else {
         KEYISOP_trace_log(correlationId, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_GEN_KEY_TITLE, loc);
@@ -460,11 +461,10 @@ int KeyIso_SERVER_generate_ec_key_pair(
     uint32_t curve,
     unsigned int keyUsage,
     KEYISO_EC_PUBLIC_KEY_ST **outPubKey, 
-    void **outEncryptedPkey,    
-    char **outSalt)
+    void **outEncryptedPkey)
 {
     KEYISOP_trace_log(correlationId, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_GEN_KEY_TITLE, "Start");
-    if (outPubKey == NULL || outEncryptedPkey == NULL || outSalt == NULL) {
+    if (outPubKey == NULL || outEncryptedPkey == NULL) {
         return _cleanup_generate_ec_key_pair(correlationId,
                                           "Invalid argument",
                                            "Failed",
@@ -473,19 +473,16 @@ int KeyIso_SERVER_generate_ec_key_pair(
                                             NULL,
                                             NULL,
                                             NULL,
-                                            0,
-                                            NULL);
+                                            0);
     }
     int ret = STATUS_FAILED;
     PSYMCRYPT_ECKEY ecKey = NULL;
     KEYISO_EC_PKEY_ST *pPkeySt = NULL;
     KEYISO_EC_PUBLIC_KEY_ST *pPubKeySt = NULL;
     void *encryptedPkey = NULL;
-    char *salt = NULL;
 
     *outPubKey = NULL;
     *outEncryptedPkey = NULL;
-    *outSalt = NULL;
 
     ret = KeyIso_ec_key_generate(correlationId, curve, keyUsage, &ecKey);
     if (ret != STATUS_OK) {
@@ -497,8 +494,7 @@ int KeyIso_SERVER_generate_ec_key_pair(
                                           NULL,
                                           NULL,
                                           NULL,
-                                          0,
-                                          salt);
+                                          0);
     }
     pPubKeySt = KeyIso_export_ec_public_key_from_symcrypt(correlationId, curve, ecKey);
     if (!pPubKeySt) {
@@ -510,8 +506,7 @@ int KeyIso_SERVER_generate_ec_key_pair(
                                           pPubKeySt,
                                           NULL,
                                           NULL,
-                                          0,
-                                          salt);
+                                          0);
     }
     size_t keyStSize = 0;
     pPkeySt = KeyIso_export_ec_pkey_from_symcrypt(correlationId, curve, ecKey, &keyStSize); //  KeyIso_clear_free() should be used to free
@@ -524,11 +519,10 @@ int KeyIso_SERVER_generate_ec_key_pair(
                                            pPubKeySt,
                                            NULL,
                                            pPkeySt,
-                                           0,
-                                           salt); 
+                                           0); 
     }   
     // Importing the generated key
-    ret = KeyIso_SERVER_import_private_key(correlationId, KMPP_EVP_PKEY_EC_NID , pPkeySt, &encryptedPkey, &salt);
+    ret = KeyIso_SERVER_import_private_key(correlationId, KMPP_EVP_PKEY_EC_NID , pPkeySt, &encryptedPkey);
     if (ret != STATUS_OK) {
         return _cleanup_generate_ec_key_pair(correlationId,
                                          "Import key",
@@ -538,11 +532,9 @@ int KeyIso_SERVER_generate_ec_key_pair(
                                          pPubKeySt,
                                          encryptedPkey,
                                          pPkeySt,
-                                         keyStSize,
-                                         salt);
+                                         keyStSize);
     }
     // Setting output parameters
-    *outSalt = salt;
     *outPubKey = pPubKeySt;
     *outEncryptedPkey = encryptedPkey;
 
@@ -554,8 +546,7 @@ int KeyIso_SERVER_generate_ec_key_pair(
                                          NULL,
                                          NULL,
                                          pPkeySt,
-                                         keyStSize,
-                                         NULL);
+                                         keyStSize);
 }
 
 static int _cleanup_open_private_key(
@@ -563,13 +554,11 @@ static int _cleanup_open_private_key(
     int ret, 
     const char *loc,
     const char *err,
-    char *password,                // KeyIso_clear_free_string
     void *privatekey,              // KEYISO_RSA_PKEY_ST/KEYISO_EC_PKEY_ST - KeyIso_clear_free() should be used to free
     unsigned int keyLen,
     unsigned char *decryptedKey,   // KeyIso_clear_free() should be used to free
     unsigned int decryptedKeyLen)
 {
-    KeyIso_clear_free_string(password);
     KeyIso_clear_free(decryptedKey, decryptedKeyLen);
     KeyIso_clear_free(privatekey, keyLen);
 
@@ -584,7 +573,7 @@ static int _cleanup_open_private_key(
 
 int KeyIso_SERVER_open_private_key( 
     const uuid_t correlationId,
-    const char *secretSalt,
+    KEYISO_CLIENT_METADATA_HEADER_ST *metaData,
     KEYISO_ENCRYPTED_PRIV_KEY_ST *pEncKeySt,    // KEYISO_ENCRYPTED_PRIV_KEY_ST
     PKMPP_KEY *outPkey)                         // KMPP_KEY. free by KeyIso_kmpp_key_free
 {
@@ -597,40 +586,42 @@ int KeyIso_SERVER_open_private_key(
     *outPkey = NULL;
     
     int ret = STATUS_FAILED;
-    int index = 0;
+    uint32_t index = 0;
     KmppKeyType type = 0;
 
-    size_t saltLen = 0;
+    size_t secretSaltLen = 0;
     size_t ivLen = 0;
     size_t hmacLen = 0;
+    size_t secretIdLen = 0;
     size_t keyTypeSize = sizeof(KmppKeyType);
+
     unsigned int keyLen = 0;
     unsigned int decryptedKeyLen = 0;
-    unsigned int version = 0;
+    unsigned int AlgVersion = 0;
 
     void *privatekey = NULL;
     void *pSymCryptKey = NULL;
-    char *password = NULL;
 
-    unsigned char *salt = NULL;
+    unsigned char *secretSalt = NULL;
     unsigned char *iv = NULL;
     unsigned char *hmac = NULL;
     unsigned char *encryptedKey = NULL;
     unsigned char *decryptedKey = NULL;
+    unsigned char* secretId = NULL;
 
-    version = pEncKeySt->algVersion;
-
-    if (version <= AlgorithmVersion_Invalid || version > AlgorithmVersion_Current) {
-        KEYISOP_trace_log_error_para(correlationId, 0, title, "Key encryption", "Unsupported encryption algorithm version", "algVersion: %u", version);
+    AlgVersion = pEncKeySt->algVersion;
+    if (AlgVersion <= AlgorithmVersion_Invalid || AlgVersion > AlgorithmVersion_Current) {
+        KEYISOP_trace_log_error_para(correlationId, 0, title, "Key encryption", "Unsupported encryption algorithm version", "algVersion: %u", AlgVersion);
         return STATUS_FAILED;
     }
 
-    KEYISOP_trace_log_para(correlationId, KEYISOP_TRACELOG_VERBOSE_FLAG, title, "Key encryption", "Encryption algorithm version: %u. Current version is: %u", version, AlgorithmVersion_Current);
+    KEYISOP_trace_log_para(correlationId, KEYISOP_TRACELOG_VERBOSE_FLAG, title, "Key encryption", "Encryption algorithm version: %u. Current version is: %u", AlgVersion, AlgorithmVersion_Current);
 
-    saltLen = pEncKeySt->saltLen;
+    secretSaltLen = pEncKeySt->secretSaltLen;
     ivLen = pEncKeySt->ivLen;
     hmacLen = pEncKeySt->hmacLen;
     decryptedKeyLen = pEncKeySt->encKeyLen;
+    secretIdLen = pEncKeySt->secretIdLen;
 
     // Check that key size doesn't exceed the maximum
     if (decryptedKeyLen > KMPP_MAX_MESSAGE_SIZE) {
@@ -640,34 +631,45 @@ int KeyIso_SERVER_open_private_key(
 
     // We don't need to waste time on memory allocation and memory copy.
     // Only copy the IV to pbChainingValue, because pbChainingValue is not a constant and is updated for every block.
-    salt = &pEncKeySt->encryptedKeyBytes[index];
-    index += saltLen;
+    secretSalt = &pEncKeySt->encryptedKeyBytes[index];
+    index += secretSaltLen;
     iv = &pEncKeySt->encryptedKeyBytes[index];
     index += ivLen;
     hmac = &pEncKeySt->encryptedKeyBytes[index];
     index += hmacLen;
+    secretId = &pEncKeySt->encryptedKeyBytes[index];
+    index += secretIdLen;
     encryptedKey = &pEncKeySt->encryptedKeyBytes[index];
     index += decryptedKeyLen;
+
+    uint32_t expectedEncKeyLen = 0;
+    if (KeyIso_get_enc_key_bytes_len_params(correlationId, secretSaltLen, ivLen, hmacLen, decryptedKeyLen, secretIdLen, &expectedEncKeyLen) != STATUS_OK) {
+        return _cleanup_open_private_key(correlationId,
+                                         STATUS_FAILED,
+                                         "KeyIso_get_enc_key_bytes_len_params",
+                                         "Failed to get encrypted key length",
+                                         privatekey,
+                                         0,
+                                         decryptedKey,
+                                         0);
+    }
+    if (index != expectedEncKeyLen) {
+        KEYISOP_trace_log_error_para(correlationId, 0, title, "Encrypted key length", "Invalid encrypted key length", "expected: %u, actual: %u", expectedEncKeyLen, index);
+        return _cleanup_open_private_key(correlationId,
+                                         STATUS_FAILED,
+                                         "Encrypted key length",
+                                         "Invalid encrypted key length",
+                                         privatekey,
+                                         0,
+                                         decryptedKey,
+                                         0);
+    }
 
     if (ivLen != KMPP_AES_BLOCK_SIZE)
         return _cleanup_open_private_key(correlationId,
                                          STATUS_FAILED,
                                          "IV length",
                                          "Incorrect IV length",
-                                         password,
-                                         privatekey,
-                                         0,
-                                         decryptedKey,
-                                         0);
-
-    // Retrieving password from salt
-    ret = KeyIso_generate_password_from_salt(correlationId, secretSalt, &password);
-    if (ret != STATUS_OK)
-        return _cleanup_open_private_key(correlationId,
-                                         STATUS_FAILED,
-                                         "Password generation",
-                                         "Failed",
-                                         password,
                                          privatekey,
                                          0,
                                          decryptedKey,
@@ -679,26 +681,26 @@ int KeyIso_SERVER_open_private_key(
                                          STATUS_FAILED,
                                          "decryptedKey",
                                          "Memory allocation failed",
-                                         password,
                                          privatekey,
                                          0,
                                          decryptedKey,
                                          0);
 
-    // PKCS #5 password-based decryption + HMAC validation
-    ret = KeyIso_symcrypt_pbe_decrypt_hmac( 
+    // Decrypting the private key using KDF (SP800-108) and HMAC
+    ret = KeyIso_symcrypt_kdf_decrypt_hmac(
         correlationId,
-        title,
-        version,
-        (unsigned char *)password,
-        (password) ? strlen(password) : 0,
-        salt,
-        saltLen,
+        AlgVersion,
+        (const unsigned char *)metaData,
+        (metaData) ? sizeof(*metaData) : 0,
+        secretId,
+        secretIdLen,
+        secretSalt,
+        secretSaltLen,
         iv,
         ivLen,
         hmac,
-        hmacLen,   
-        encryptedKey, 
+        hmacLen,
+        encryptedKey,
         decryptedKey,
         decryptedKeyLen);
     if (ret != STATUS_OK)
@@ -706,7 +708,6 @@ int KeyIso_SERVER_open_private_key(
                                          STATUS_FAILED,
                                          "pbe_decrypt_hmac",
                                          "Failed",
-                                         password,
                                          privatekey,
                                          0,
                                          decryptedKey,
@@ -723,7 +724,6 @@ int KeyIso_SERVER_open_private_key(
                                             STATUS_FAILED,
                                             "Padding",
                                             "Invalid value",
-                                            password,
                                             privatekey,
                                             0,
                                             decryptedKey,
@@ -738,7 +738,6 @@ int KeyIso_SERVER_open_private_key(
                                          STATUS_FAILED,
                                          "privatekey",
                                          "Memory allocation failed",
-                                         password,
                                          privatekey,
                                          0,
                                          decryptedKey,
@@ -755,7 +754,6 @@ int KeyIso_SERVER_open_private_key(
                                          STATUS_FAILED,
                                          "header",
                                          "Invalid key header",
-                                         password,
                                          privatekey,
                                          keyLen,
                                          decryptedKey,
@@ -778,7 +776,6 @@ int KeyIso_SERVER_open_private_key(
                                              STATUS_FAILED,
                                              "Type",
                                              "Unsupported key type",
-                                             password,
                                              privatekey,
                                              keyLen,
                                              decryptedKey,
@@ -799,7 +796,6 @@ int KeyIso_SERVER_open_private_key(
                                          STATUS_FAILED,
                                          "KMPP_KEY",
                                          "Creation failed",
-                                         password,
                                          privatekey,
                                          keyLen,
                                          decryptedKey,
@@ -810,7 +806,6 @@ int KeyIso_SERVER_open_private_key(
                                      STATUS_OK,
                                      "Complete- Success",
                                      "",
-                                     password,
                                      privatekey,
                                      keyLen,
                                      decryptedKey,
@@ -1088,7 +1083,7 @@ int KeyIso_SERVER_pkey_rsa_sign(
     }
 
     if (pkeyRsaSign.sigmdType != pkeyRsaSign.mgfmdType) {
-        KEYISOP_trace_log_para(correlationId, 0, title, "pkey rsa sign - Invalid input", "pkeyRsaSign.sigmdType: %d, pkeyRsaSign.mgfmdType: %d", pkeyRsaSign.sigmdType, pkeyRsaSign.mgfmdType); 
+        KEYISOP_trace_log_para(correlationId, KEYISOP_TRACELOG_WARNING_FLAG, title, "pkey rsa sign - Invalid input", "pkeyRsaSign.sigmdType: %d, pkeyRsaSign.mgfmdType: %d", pkeyRsaSign.sigmdType, pkeyRsaSign.mgfmdType); 
         return _rsa_fallback_to_openssl(correlationId,
                                     "Currently Symcrypt library does not support different hash algorithms for signature and MGF1",
                                     fallbackFunction,
@@ -1299,7 +1294,7 @@ static int _encode_to_der(
         (inSymCryptSignatureLen > KMPP_ECDSA_MAX_SYMCRYPT_SIGNATURE_LEN) ||
         (inSymCryptSignatureLen % 2 == 1)) {
 
-        KEYISOP_trace_log_para(correlationId, 0, KEYISOP_ECC_SIGN_TITLE,
+        KEYISOP_trace_log_error_para(correlationId, 0, KEYISOP_ECC_SIGN_TITLE,
                                "Incorrect size", "inSymCryptSignatureLen",
                                "inSymCryptSignatureLen %d should be even integer in range [%d, %d]",
                                inSymCryptSignatureLen, KMPP_ECDSA_MIN_SYMCRYPT_SIGNATURE_LEN, KMPP_ECDSA_MAX_SYMCRYPT_SIGNATURE_LEN);     
@@ -1335,9 +1330,9 @@ static int _encode_to_der(
     
     *outDerSiglen = cbSeq + padSeq + 2;
     if (*outDerSiglen > derSiglen) {
-        KEYISOP_trace_log_para(correlationId, 0, KEYISOP_ECC_SIGN_TITLE,
-                               "Incorrect size", "the der encoded signature size is grater then the provided buffer",
-                               "DER encoded signature len, outDerSiglen: %d, The provided buffer len,derSiglen:%d ", outDerSiglen, derSiglen);
+        KEYISOP_trace_log_error_para(correlationId, 0, KEYISOP_ECC_SIGN_TITLE,
+                                     "Incorrect size", "The DER encoded signature size is greater than the provided buffer",
+                                     "DER encoded signature len: %d, Provided buffer len: %d", *outDerSiglen, derSiglen);
         return STATUS_FAILED;
     }
 

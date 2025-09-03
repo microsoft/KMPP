@@ -608,10 +608,6 @@ static int _rsa_signature_sign(KEYISO_PROV_RSA_CTX *ctx, unsigned char *sig, siz
 
 
     STOP_MEASURE_TIME(KeyisoKeyOperation_PkeyRsaSign);
- 
-#ifdef KEYS_IN_USE_AVAILABLE
-    //KeyInUseToDo: p_scossl_keysinuse_on_sign(ctx->provKey->keysInUseCtx);
-#endif
 
     return ret;
 }
@@ -696,7 +692,6 @@ static int _rsa_signature_digest_sign_final(KEYISO_PROV_RSA_CTX *ctx, unsigned c
 
     return ret;
 }
-
 
 static int _rsa_signature_digest_verify_final(KEYISO_PROV_RSA_CTX *ctx, unsigned char *sig, size_t sigLen)
 {

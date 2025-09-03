@@ -209,7 +209,7 @@ int KeyIso_CLIENT_cert_ctrl(
     }
 
     if (ret > 0) {
-        KEYISOP_trace_log(correlationId, 0, title, "Complete");
+        KEYISOP_trace_log(correlationId, KEYISOP_TRACELOG_VERBOSE_FLAG, title, "Complete");
     } else {
         KEYISOP_trace_log_error(correlationId, 0, title, "Complete",
             ret < 0 ? "Partial updates" : "No updates");

@@ -21,7 +21,8 @@ int KeyIso_TPM_rsa_private_decrypt(
     const unsigned char *from,
     unsigned int tlen,
     unsigned char *to, 
-    int padding);
+    int padding, 
+    int labelLen);
 
 // Signs data using the RSA private key (RSA-PKCS1)
 int KeyIso_TPM_rsa_sign(

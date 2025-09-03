@@ -55,21 +55,23 @@ static int _kmpp_aes_256_cbc_hmac_sha256_init_key(EVP_CIPHER_CTX* ctx, const uns
         KeyIso_rand_bytes(keyCtx->correlationId, sizeof(keyCtx->correlationId));
         int keyLength;
         unsigned char *keyBytes;
+        char* clientData = NULL;
        
         if (!KeyIso_parse_pfx_engine_key_id(
                 keyCtx->correlationId,
                 (char *)key,
                 &keyLength,
                 &keyBytes,
-                NULL)) {
+                &clientData)) {
             KMPPPFXerr(KMPPPFX_F_INIT_SYMMETRIC_KEY, KMPPPFX_R_PARSE_PFX_KEY_ID_ERROR);
             KEYISOP_trace_log_error(NULL, 0, title, NULL, "KeyIso_parse_pfx_engine_key_id FAILED");
             return STATUS_FAILED;
         }   
 
-        int status = KeyIso_CLIENT_init_key_ctx(keyCtx, keyLength, keyBytes, NULL);
+        int status = KeyIso_CLIENT_init_key_ctx(keyCtx, keyLength, keyBytes, clientData);
 
         KeyIso_free(keyBytes);
+        KeyIso_clear_free_string(clientData);
         return status;
     }
     return STATUS_OK;
@@ -89,7 +91,7 @@ static int _kmpp_aes_256_cbc_hmac_sha256_cipher(EVP_CIPHER_CTX* ctx, unsigned ch
 
     KEYISOP_trace_log(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, title, "kmpp_aes_256_cbc_hmac_sha256_cipher");
     if (inLen == 0) {
-        //assuming that this is EVP_EncryptFinal_ex that dosn't need here - we are calling only once
+        //assuming that this is EVP_EncryptFinal_ex that doesn't need here - we are calling only once
         return outLen;
     }
 

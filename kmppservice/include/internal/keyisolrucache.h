@@ -36,7 +36,7 @@ struct KMPP_cache_st {
 };
 
 // Create a cache according to the given capacity
-KMPP_LRU_CACHE *KeyIso_create_cache(uint32_t capacity, ValueFreeFunction valueFreeFunc, ValueRefCountFunction valueRefCountIncrementFunc);
+KMPP_LRU_CACHE *KeyIso_cache_create(uint32_t capacity, ValueFreeFunction valueFreeFunc, ValueRefCountFunction valueRefCountIncrementFunc);
 
 // Returns the unique hash key or 0 for error
 uint64_t KeyIso_cache_put(KMPP_LRU_CACHE *cache, uint32_t random, void* value, const char *tag);

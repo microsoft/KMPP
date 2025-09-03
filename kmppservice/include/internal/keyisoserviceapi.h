@@ -8,7 +8,8 @@
 #include <kmppsymcryptwrapper.h>
 #include <keyisoservicekey.h>
 
-#include "keyisocommon.h"
+#include "keyisoservicecommon.h"
+
 
 #ifdef  __cplusplus
 extern "C" {
@@ -16,7 +17,7 @@ extern "C" {
 
 int KeyIso_SERVER_open_private_key( 
     const uuid_t correlationId,
-    const char *secretSalt,
+    KEYISO_CLIENT_METADATA_HEADER_ST *metaData,
     KEYISO_ENCRYPTED_PRIV_KEY_ST *pEncKeySt,  
     PKMPP_KEY* outPkey);   //KMPP_KEY. free by KeyIso_kmpp_key_free
     
@@ -24,24 +25,21 @@ int KeyIso_SERVER_import_private_key(
     const uuid_t correlationId,
     int keyType,
     const void *inKey,            // KEYISO_RSA_PKEY_ST/KEYISO_EC_PKEY_ST
-    void **outEncKey,             // KEYISO_ENCRYPTED_PRIV_KEY_ST
-    char **outSalt);
-
+    void **outEncKey);             // KEYISO_ENCRYPTED_PRIV_KEY_ST
+    
 int KeyIso_SERVER_generate_rsa_key_pair(
     const uuid_t correlationId, 
     unsigned int keyBits,
     unsigned int keyUsage,
     KEYISO_RSA_PUBLIC_KEY_ST **outPubKey,            
-    void **outEncryptedPkey,      // KEYISO_ENCRYPTED_PRIV_KEY_ST
-    char **outSalt);
+    void **outEncryptedPkey);      // KEYISO_ENCRYPTED_PRIV_KEY_ST
 
 int KeyIso_SERVER_generate_ec_key_pair(
     const uuid_t correlationId, 
     unsigned int curve,
     unsigned int keyUsage,
     KEYISO_EC_PUBLIC_KEY_ST **outPubKey,
-    void **outEncryptedPkey,      // KEYISO_ENCRYPTED_PRIV_KEY_ST
-    char **outSalt);
+    void **outEncryptedPkey);      // KEYISO_ENCRYPTED_PRIV_KEY_ST
 
 int KeyIso_SERVER_rsa_private_encrypt(
     const uuid_t correlationId, 

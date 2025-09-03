@@ -49,6 +49,9 @@ extern "C" {
 // In this way we avoid the need of adding KMPP object to the OpenSSL internal table.
 #define KMPP_OID_NO_NAME    1
 
+// KMPP_OSSL_PROVIDER_DEFAULT is used to load explicitly openssl default provider in OpenSSL 3.x
+#define KMPP_OSSL_PROVIDER_DEFAULT "provider=default"
+
 // KeyIso engine name
 #ifndef KMPP_MSCRYPT_ENGINE
 #define KMPP_ENGINE_ID "kmpppfx"
@@ -62,17 +65,13 @@ extern "C" {
 #include "keyisotpmclient.h"
 #endif // KMPP_GENERAL_PURPOSE_TARGET
 
-typedef enum {
-    KeyIsoKeyType_pfx = 0,
-    KeyIsoKeyType_symmetric,
-    KeyIsoKeyType_max
-} KeyIsoKeyType;
 
 typedef struct keyiso_client_config_st KEYISO_CLIENT_CONFIG_ST;
 struct keyiso_client_config_st {
     KeyIsoSolutionType solutionType;
     bool isDefaultSolutionType;
     bool isKmppEnabledByDefault;
+    bool isLegacyMode;
 #ifdef KMPP_GENERAL_PURPOSE_TARGET
     KEYISO_TPM_CONFIG_ST tpmConfig;
 #endif  // KMPP_GENERAL_PURPOSE_TARGET
@@ -81,18 +80,36 @@ struct keyiso_client_config_st {
 // Define the msg handler functions table
 typedef struct client_msg_handler_functions_table_st CLIENT_MSG_HANDLER_FUNCTIONS_TABLE_ST;
 struct client_msg_handler_functions_table_st {
-    int (*init_key)(KEYISO_KEY_CTX *keyCtx, int keyLength, const unsigned char *keyBytes, const char *salt);
+    int (*init_key)(KEYISO_KEY_CTX *keyCtx, int keyLength, const unsigned char *keyBytes, const char *clientData);
     void (*free_keyCtx)(KEYISO_KEY_CTX *keyCtx);
     void (*close_key)(KEYISO_KEY_CTX *keyCtx);
-    int (*rsa_private_encrypt_decrypt)(KEYISO_KEY_CTX *keyCtx, int decrypt, int flen, const unsigned char *from, int tlen, unsigned char *to, int padding);
+    int (*rsa_private_encrypt_decrypt)(KEYISO_KEY_CTX *keyCtx, int decrypt, int flen, const unsigned char *from, int tlen, unsigned char *to, int padding, int labelLen);
     int (*ecdsa_sign)(KEYISO_KEY_CTX *keyCtx, int type, const unsigned char *dgst, int dlen, unsigned char *sig, unsigned int sigLen, unsigned int *outLen);
-    int (*import_symmetric_key)(const uuid_t correlationId, int inSymmetricKeyType, unsigned int inKeyLength, const unsigned char *inKeyBytes, const unsigned char *inImportKeyId, unsigned int *outKeyLength, unsigned char **outKeyBytes);
+    int (*import_symmetric_key)(const uuid_t correlationId, int inSymmetricKeyType, unsigned int inKeyLength, const unsigned char *inKeyBytes, const unsigned char *inImportKeyId, unsigned int *outKeyLength, unsigned char **outKeyBytes, char **outClientData);
     int (*symmetric_key_encrypt_decrypt)(KEYISO_KEY_CTX *keyCtx, int mode, const unsigned char *from, const unsigned int fromLen, unsigned char *to, unsigned int *toLen);
-    int (*import_private_key)(const uuid_t correlationId, int keyType, const unsigned char *inKeyBytes, X509_SIG **outEncKey, char **outSalt);
-    int (*generate_rsa_key_pair)(const uuid_t correlationId, unsigned int rsaBits, uint8_t keyUsage, EVP_PKEY** outPubKey, X509_SIG **outEncryptedPkey, char **outSalt);
-    int (*generate_ec_key_pair)(const uuid_t correlationId, unsigned int curve, uint8_t keyUsage, EC_GROUP** outEcGroup, EC_KEY** outPubKey, X509_SIG **outEncryptedPkey, char **outSalt);    
+    int (*import_private_key)(const uuid_t correlationId, int keyType, const unsigned char *inKeyBytes, X509_SIG **outEncKey, KEYISO_CLIENT_DATA_ST **outClientData);
+    int (*generate_rsa_key_pair)(const uuid_t correlationId, unsigned int rsaBits, uint8_t keyUsage, EVP_PKEY** outPubKey, X509_SIG **outEncryptedPkey, KEYISO_CLIENT_METADATA_HEADER_ST *outMetaData);
+    int (*generate_ec_key_pair)(const uuid_t correlationId, unsigned int curve, uint8_t keyUsage, EC_GROUP** outEcGroup, EC_KEY** outPubKey, X509_SIG **outEncryptedPkey, KEYISO_CLIENT_METADATA_HEADER_ST *outMetaData);    
     void (*set_config)(const KEYISO_CLIENT_CONFIG_ST *config);
 };
+
+// Function pointer types for KeysInUse functions
+typedef void* (*keysinuse_load_key_func_ptr)(const unsigned char *encodedPubKey, int encodedPubKeyLength);
+typedef void (*keysinuse_on_use_func_ptr)(void *keysInUseCtx, int operationEnumValue);
+typedef void (*keysinuse_unload_key_func_ptr)(void *keysInUseCtx);
+typedef unsigned int (*keysinuse_get_key_identifier_func_ptr)(void *keysInUseCtx, char *pbKeyIdentifier, unsigned long cbKeyIdentifier);
+// Structure to hold KeysInUse library state and function pointers
+typedef struct keyiso_keysinuse_st KEYISO_KEYSINUSE_ST;
+struct keyiso_keysinuse_st {
+    void *handle;
+    bool isLibraryLoaded;
+    keysinuse_load_key_func_ptr load_key_func;
+    keysinuse_on_use_func_ptr on_use_func;
+    keysinuse_unload_key_func_ptr unload_key_func;
+    keysinuse_get_key_identifier_func_ptr get_key_identifier_func;
+};
+
+bool KeyIso_load_keysInUse_library();
 
 /*///////////////////////////////////////////// 
     Backward-Compatibility helper functions
@@ -125,13 +142,13 @@ int KeyIso_CLIENT_import_private_key_from_pfx(
     int *outVerifyChainError,
     int *outPfxLength,
     unsigned char **outPfxBytes,                // KeyIso_free()
-    char **outPfxSalt);                         // KeyIso_free()
+    char  **outClientData);                     // Base64 encoded string
 
 int KeyIso_CLIENT_private_key_open_from_pfx(
     const uuid_t correlationId,
     int pfxLength,
     const unsigned char* pfxBytes,
-    const char* salt,           
+    const char *clientData,    // Base64 encoded string          
     KEYISO_KEY_CTX** keyCtx);          
 
 int KeyIso_CLIENT_import_private_key( 
@@ -139,7 +156,7 @@ int KeyIso_CLIENT_import_private_key(
     int keyisoFlags, 
     const EVP_PKEY *inPkey,
     X509_SIG **outEncryptedPkey,
-    char **outSalt);
+    char  **outClientData);          // Base64 encoded string
 
 int KeyIso_CLIENT_generate_rsa_key_pair_conf( 
     const uuid_t correlationId,
@@ -147,7 +164,7 @@ int KeyIso_CLIENT_generate_rsa_key_pair_conf(
     const CONF *conf,
     EVP_PKEY **outPubKey, 
     X509_SIG **outEncryptedPkey,
-    char **outSalt);
+    char  **outClientData);                     // Base64 encoded string
 
 int KeyIso_CLIENT_generate_rsa_key_pair(
     const uuid_t correlationId,
@@ -157,7 +174,7 @@ int KeyIso_CLIENT_generate_rsa_key_pair(
     uint32_t nPubExp,
     EVP_PKEY** pubEpkey,
     X509_SIG** encryptedPkey,
-    char** salt);
+    char  **outClientData);               // Base64 encoded string
 
 int KeyIso_CLIENT_generate_ec_key_pair( 
     const uuid_t correlationId,
@@ -166,13 +183,13 @@ int KeyIso_CLIENT_generate_ec_key_pair(
     EC_GROUP** outEcGroup,
     EC_KEY **outPubKey, 
     X509_SIG **outEncryptedPkey,
-    char **outSalt);
+    char  **outClientData);               // Base64 encoded string
 
 int KeyIso_CLIENT_init_key_ctx(
     KEYISO_KEY_CTX *keyCtx, 
     int keyLength, 
     const unsigned char *keyBytes, 
-    const char *salt);
+    const char  *clientData);            // Base64 encoded string
 
 void KeyIso_CLIENT_free_key_ctx(
     KEYISO_KEY_CTX *keyCtx);
@@ -187,7 +204,7 @@ int KeyIso_CLIENT_create_self_sign_pfx_p8(
     const char *confStr,
     int *pfxLength,
     unsigned char **pfxBytes,
-    char **pfxSalt);
+    char  **outClientData);               // Base64 encoded string
 
 int KeyIso_CLIENT_create_X509_from_pubkey(
     const uuid_t correlationId,
@@ -219,44 +236,14 @@ PKCS12 *KeyIso_pkcs12_create_p8(
     X509 *cert, 
     STACK_OF(X509) *ca);
 
-X509_ALGOR *KeyIso_pbe_set_algor(
-    unsigned long version,
-    const unsigned char *salt, 
-    unsigned int saltLen,
-    const unsigned char *iv, 
-    unsigned int ivLen,
-    const unsigned char *hmac, 
-    unsigned int hmacLen);
-
-int KeyIso_pbe_get_algor_params(
-    const X509_ALGOR *alg,
-    unsigned int *version,
-    unsigned char **salt, 
-    unsigned int *saltLen,
-    unsigned char **iv, 
-    unsigned int *ivLen,
-    unsigned char **hmac, 
-    unsigned int *hmacLen);
-
 bool KeyIso_is_oid_pbe2(
     const uuid_t correlationId, 
     const unsigned char *keyBytes, 
     int keyLen);
 
-int KeyIso_get_enc_key_params(
-    const KEYISO_ENCRYPTED_PRIV_KEY_ST *inEncKey,
-    unsigned long *version,
-    unsigned char **salt,
-    unsigned int *saltLen,
-    unsigned char **iv,
-    unsigned int *ivLen,
-    unsigned char **hmac,
-    unsigned int *hmacLen,
-    unsigned char **encKeyBuf,
-    unsigned int *encKeyLen);
-
 int KeyIso_create_pkcs8_enckey(
-    const KEYISO_ENCRYPTED_PRIV_KEY_ST *inEncKey, 
+    unsigned int opaqueEncryptedKeyLen,
+    const unsigned char *opaqueEncryptedKey, 
     X509_SIG **outP8);
 
 int KeyIso_x509_sig_dup(
@@ -290,13 +277,46 @@ int KeyIso_open_key_by_compatibility(
     KEYISO_KEY_CTX **keyCtx,
     unsigned char *pfxBytes, 
     int pfxLength, 
-    char *salt,
+    char *clientData,
     bool isKeyP8Compatible, 
     bool isServiceP8Compatible);
 
-/*//////////
-    RSA
-//////////*/
+int KeyIso_load_public_key_by_compatibility(
+    const uuid_t correlationId,
+    KEYISO_KEY_CTX *keyCtx, 
+    int isKeyP8Compatible,
+    int pfxLength,
+    unsigned char *pfxBytes,
+    EVP_PKEY **outPKey,
+    X509 **outPCert,
+    STACK_OF(X509) **outCa); 
+
+int KeyIso_encode_public_key_asn1(
+    EVP_PKEY* pkey,
+    unsigned char** outBytes,
+    uint32_t* outLen);
+
+int KeyIso_decode_public_key_asn1(
+    unsigned char *inBytes,
+    uint32_t intLen,
+    EVP_PKEY **outPkey);
+
+int KeyIso_copy_client_data(
+    const uuid_t correlationId,
+    uint8_t version,
+    uint16_t isolationSolution,
+    uint32_t pubKeyLen,
+    const uint8_t* pubKeyBytes,
+    KEYISO_CLIENT_DATA_ST** outClientData);
+
+void KeyIso_add_key_to_keys_in_use(
+    uuid_t correlationId,
+    KEYISO_KEY_CTX *keyCtx,
+    EVP_PKEY *pKey);
+
+/////////////
+//  RSA   //
+///////////
 
 // Export EVP_PKEY to struct 
 // Should be freed by the caller KeyIso_clear_free()
@@ -305,21 +325,28 @@ KEYISO_RSA_PKEY_ST* KeyIso_export_rsa_epkey(
     const void* inPkey,
     size_t* pkeySize);
 
-// Converting received public key to EVP_PKEY
+// Converting received public key params to EVP_PKEY
 EVP_PKEY* KeyIso_get_rsa_evp_pub_key(
     const uuid_t correlationId,
-    const KEYISO_RSA_PUBLIC_KEY_ST* inPubKey);
+    const uint8_t *rsaModulusBytes,
+    size_t rsaModulusLen,                            
+    const uint8_t *rsaPublicExpBytes,
+    size_t rsaPublicExpLen);
 
 int KeyIso_get_rsa_params(
     const EVP_PKEY *pkey, 
-    BIGNUM **rsa_n,  // Modulus (public)
-    BIGNUM **rsa_e,  // Exponent (public)
-    BIGNUM **rsa_p,  // Prime1 (private)
-    BIGNUM **rsa_q); // Prime2 (private)
+    BIGNUM **rsaN,  // Modulus (public)
+    BIGNUM **rsaE,  // Exponent (public)
+    BIGNUM **rsaP,  // Prime1 (private)
+    BIGNUM **rsaQ);  // Prime2 (private)
 
-/*//////////
-    EC
-//////////*/
+EVP_PKEY* KeyIso_get_rsa_public_key(
+    const uuid_t correlationId, 
+    const EVP_PKEY *privKey);
+
+/////////////
+//  EC    //
+///////////
 
 // Export EVP_PKEY to struct 
 // Should be freed by the caller KeyIso_clear_free()
@@ -327,6 +354,21 @@ KEYISO_EC_PKEY_ST* KeyIso_export_ec_private_key(
     const uuid_t correlationId,
     const void* inPkey,
     size_t* outKeySize);
+
+int KeyIso_get_ec_evp_key(
+    const uuid_t correlationId,
+    uint32_t curve,
+    uint32_t ecPubKeyLen,
+    const uint8_t *ecPubKeyBytes,
+    uint32_t ecPrivateKeyLen,
+    const uint8_t *ecPrivateKeyBytes,
+    EC_KEY **outEcKey,
+    EC_GROUP **outEcGroup);
+
+
+EVP_PKEY* KeyIso_get_ec_public_key(
+    const uuid_t correlationId,
+    const EVP_PKEY *privKey);
 
 #ifdef  __cplusplus
 }

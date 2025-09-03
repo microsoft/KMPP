@@ -35,17 +35,6 @@ typedef enum {
 //////////////// Internal KDF methods ///////////////
 /////////////////////////////////////////////////////
 
-int KeyIso_symcrypt_pbe_key_derivation(
-    const uuid_t correlationId, 
-    PCSYMCRYPT_MAC  macAlgorithm,
-    uint64_t iterationCnt,
-    const unsigned char *password,
-    uint32_t passwordLen,
-    const unsigned char *salt,  // optional
-    uint32_t saltLen,
-    unsigned char *kdf2Key,
-    uint32_t kdf2KeyLen);
-
 int KeyIso_symcrypt_kdf_key_derivation(
     const uuid_t correlationId, 
     PCSYMCRYPT_MAC  macAlgorithm,
@@ -57,6 +46,58 @@ int KeyIso_symcrypt_kdf_key_derivation(
     uint32_t contextLen,
     unsigned char *kdf2Key,
     uint32_t kdf2KeyLen);
+
+int KeyIso_kdf_generate_key(
+    const uuid_t correlationId,
+    PCSYMCRYPT_MAC macAlgorithm,
+    unsigned char *secretSalt,
+    uint32_t secretSaltLen,
+    unsigned char *secretId, // Used as GUID (uuid_t) in process based and as extra salt (32 bytes) in TA
+    uint32_t *secretIdLen,
+    unsigned char *derivedKey,
+    uint32_t derivedKeyLen);
+
+int KeyIso_kdf_generate_key_by_id(
+    const uuid_t correlationId,
+    const unsigned char *secretId,
+    uint32_t secretIdLen,
+    PCSYMCRYPT_MAC macAlgorithm,
+    const unsigned char *secretSalt,
+    uint32_t secretSaltLen,
+    unsigned char *derivedKey,
+    uint32_t derivedKeyLen);
+
+int KeyIso_symcrypt_kdf_encrypt_hmac(
+    const uuid_t correlationId,
+    uint32_t version,
+    unsigned char *secretId,         // secret id - uuid_t in process based (GUID), 32 bytes in TA (extra salt)
+    uint32_t *secretIdLen,           // secret id length
+    unsigned char *secretSalt,       // salt for KDF
+    uint32_t secretSaltLen,          // secretSaltLen: KMPP_SALT_SHA256_SIZE
+    unsigned char *iv,               // AES IV, `
+    uint32_t ivLen,                  // ivLen: KMPP_AES_BLOCK_SIZE 
+    const unsigned char *inBuf,      // private key to encrypt 
+    unsigned char *outBuf,           // encrypted private key
+    uint32_t bufLen,                 // multiple of KMPP_AES_BLOCK_SIZE
+    unsigned char *hmac,             // HMAC result
+    uint32_t hmacLen);               // hmacLen: KMPP_HMAC_SHA256_KEY_SIZE
+
+int KeyIso_symcrypt_kdf_decrypt_hmac(
+    const uuid_t correlationId,
+    uint32_t version,
+    const unsigned char *metaData,
+    uint32_t metaDataLen,
+    const unsigned char *secretId,   // machine secret ID (GUID in process-based, extra salt in TA)
+    uint32_t secretIdLen,            // secret ID len: sizeof(UUID) or 32 bytes in TA
+    const unsigned char *secretSalt, // salt for KDF
+    uint32_t secretSaltLen,          // secretSaltLen: KMPP_SALT_SHA256_SIZE
+    unsigned char *iv,               // AES IV
+    uint32_t ivLen,                  // ivLen: KMPP_AES_BLOCK_SIZE
+    const unsigned char *hmac,       // HMAC result
+    uint32_t hmacLen,                // hmacLen: KMPP_HMAC_SHA256_KEY_SIZE
+    const unsigned char *inBuf,      // encrypted private key
+    unsigned char *outBuf,           // decrypted private key
+    uint32_t bufLen);                // multiple of KMPP_AES_BLOCK_SIZE
 
 /////////////////////////////////////////////////////
 //////////////// Internal AES methods ///////////////
@@ -93,60 +134,6 @@ int KeyIso_padding_pkcs7_remove(
     unsigned char *decryptedData,
     unsigned int decryptedDataLen,
     unsigned int *removedPaddingDataLen);
-
-/////////////////////////////////////////////////////
-/////////////// Internal PBE methods ////////////////
-/////////////////////////////////////////////////////
-
-// PKCS #5 password-based encryption + HMAC calculation
-int KeyIso_symcrypt_pbe_encrypt_hmac(
-    const uuid_t correlationId,
-    const char *title,
-    uint32_t version,
-    const unsigned char *password,
-    uint32_t passwordLen,
-    const unsigned char *salt,   // optional
-    uint32_t saltLen,
-    unsigned char *iv,           // ivLen: KMPP_AES_BLOCK_SIZE
-    uint32_t ivLen,    
-    const unsigned char *inBuf, 
-    unsigned char *outBuf,
-    uint32_t bufLen,             // multiple of KMPP_AES_BLOCK_SIZE
-    unsigned char *hmac,
-    uint32_t hmacLen);
-    
-int KeyIso_symcrypt_pbe(
-    const uuid_t correlationId,
-    const char *title,
-    const int mode,
-    const unsigned char *password,
-    uint32_t passwordLen,
-    const unsigned char *salt,   // optional
-    uint32_t saltLen,
-    unsigned char *iv,           // ivLen: KMPP_AES_BLOCK_SIZE
-    uint32_t ivLen,    
-    const unsigned char *inBuf, 
-    unsigned char *outBuf,
-    uint32_t bufLen,             // multiple of KMPP_AES_BLOCK_SIZE
-    unsigned char **derivedKey,
-    uint32_t *keySize);
-
-// PKCS #5 password-based decryption + HMAC verification
-int KeyIso_symcrypt_pbe_decrypt_hmac(
-    const uuid_t correlationId,
-    const char *title,
-    uint32_t version,
-    const unsigned char *password,
-    uint32_t passwordLen,
-    const unsigned char *salt,
-    uint32_t saltLen,
-    unsigned char *iv,
-    uint32_t ivLen,
-    const unsigned char *hmac,
-    uint32_t hmacLen,   
-    const unsigned char *inBuf, 
-    unsigned char *outBuf,
-    uint32_t bufLen);
 
 /////////////////////////////////////////////////////
 ///////// Internal Asymmetric Keys methods //////////

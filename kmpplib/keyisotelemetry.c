@@ -29,6 +29,7 @@ void _KeyIsoP_trace_metric_output(
     const uuid_t correlationId,
     const int flags,
     int isolationSolution,
+    int keysInUseLibraryLoaded,
     const char* title,
     const char* loc,
     const char* error,
@@ -38,7 +39,7 @@ void _KeyIsoP_trace_metric_output(
      const char* initialStr = "kmpp_metric";
      char extendedFormat[KEYISOP_TRACELOG_PARA_LENGTH];
      const char* safeParaFormat = paraFormat ? paraFormat : "";
-     snprintf(extendedFormat, sizeof(extendedFormat), "%s Isolation solution=%d, Version=%s", safeParaFormat, isolationSolution, PKG_VERSION);
+     snprintf(extendedFormat, sizeof(extendedFormat), "%s Isolation solution=%d, Version=%s, keysInUseLibraryLoaded:%d", safeParaFormat, isolationSolution, PKG_VERSION, keysInUseLibraryLoaded);
 
      _KeyIsoP_trace_output(
      file,
@@ -61,6 +62,7 @@ void _KeyIsoP_trace_metric_para(
     const uuid_t correlationId,
     const int flags,
     int isolationSolution,
+    int keysInUseLibraryLoaded,
     const char *title,
     const char *loc,
     const char *format, ...)
@@ -75,6 +77,7 @@ void _KeyIsoP_trace_metric_para(
         correlationId,
         flags,
         isolationSolution,
+        keysInUseLibraryLoaded,
         title,
         loc,
         "",                         // error
@@ -89,6 +92,7 @@ void _KeyIsoP_trace_metric(
     const uuid_t correlationId,
     const int flags,
     int isolationSolution,
+    int keysInUseLibraryLoaded,
     const char *title,
     const char *loc)
 {
@@ -99,6 +103,7 @@ void _KeyIsoP_trace_metric(
         correlationId,
         flags,
         isolationSolution,
+        keysInUseLibraryLoaded,
         title,
         loc,
         "");
@@ -112,6 +117,7 @@ void _KeyIsoP_trace_metric_error_para(
     const uuid_t correlationId,
     const int flags,
     int isolationSolution,
+    int keysInUseLibraryLoaded,
     const char *title,
     const char *loc,
     const char *errStr,
@@ -139,6 +145,7 @@ void _KeyIsoP_trace_metric_error_para(
         correlationId,
         flags,
         isolationSolution,
+        keysInUseLibraryLoaded,
         title,
         loc,
         error,
@@ -153,6 +160,7 @@ void _KeyIsoP_trace_metric_error(
     const uuid_t correlationId,
     const int flags,
     int isolationSolution,
+    int keysInUseLibraryLoaded,
     const char *title,
     const char *loc,
     const char *errStr)
@@ -164,6 +172,7 @@ void _KeyIsoP_trace_metric_error(
         correlationId,
         flags,
         isolationSolution,
+        keysInUseLibraryLoaded,
         title,
         loc,
         errStr,
@@ -212,6 +221,7 @@ struct KeyIsop_cpu_snapshot_st{
 static int KEYISOP_logCountThreshold = KEYISOP_COUNTERS_THRESHOLD;
 static int KEYISOP_logTimeThreshold = KEYISOP_MAX_TIME_WINDOW_MINUTES;
 static int KEYISOP_IsolationSolution = 0;
+static int KEYISOP_KeysInUseLibraryLoaded = 0;
 static KEYISO_KEY_OP_COUNTERS KEYISOP_countersArr[KeyisoKeyOperation_Max];
 static const char* KEYISOP_keyOperationsStr[KeyisoKeyOperation_Max] = {
     "RSA_PRIV_ENC",
@@ -224,7 +234,7 @@ static const char* KEYISOP_keyOperationsStr[KeyisoKeyOperation_Max] = {
     "SYMMETRIC_KEY_ENC",
     "SYMMETRIC_KEY_DEC"};
 
-void KeyIso_init_counter_th(int *outCountTh, int *outTimeTh, int isolationSolution)
+void KeyIso_init_counter_th(int *outCountTh, int *outTimeTh, int isolationSolution, int keysInUseLibraryLoaded)
 {
     int logCountThreshold = 0;
     int logTimeTh = 0;
@@ -249,7 +259,8 @@ void KeyIso_init_counter_th(int *outCountTh, int *outTimeTh, int isolationSoluti
     *outCountTh = KEYISOP_logCountThreshold;
     *outTimeTh = KEYISOP_logTimeThreshold;
     KEYISOP_IsolationSolution = isolationSolution;
-    KEYISOP_trace_log_para(NULL, 0, KEYISOP_SUPPORT_TITLE, NULL,"Metrics counters threshold is %d, time threshold in minutes is:%d, isolation solution:%d", KEYISOP_logCountThreshold, KEYISOP_logTimeThreshold, KEYISOP_IsolationSolution);
+    KEYISOP_KeysInUseLibraryLoaded = keysInUseLibraryLoaded;
+    KEYISOP_trace_log_para(NULL, 0, KEYISOP_SUPPORT_TITLE, NULL,"Metrics counters threshold is %d, time threshold in minutes is:%d, isolation solution:%d, keysInUseLibraryLoaded:%d", KEYISOP_logCountThreshold, KEYISOP_logTimeThreshold, KEYISOP_IsolationSolution, KEYISOP_KeysInUseLibraryLoaded);
 }
 
 void KeyIso_set_counter_th(int logCountThreshold)
@@ -257,7 +268,7 @@ void KeyIso_set_counter_th(int logCountThreshold)
     const char* title = KEYISOP_SUPPORT_TITLE;
     if (logCountThreshold > 0 && logCountThreshold < KEYISOP_COUNTERS_THRESHOLD) {
         KEYISOP_logCountThreshold = logCountThreshold;
-        KEYISOP_trace_metric_para(NULL, 0, KEYISOP_IsolationSolution, title, NULL,"Metrics counters threshold was set to %d", KEYISOP_logCountThreshold);
+        KEYISOP_trace_metric_para(NULL, 0, KEYISOP_IsolationSolution,  KEYISOP_KeysInUseLibraryLoaded, title, NULL,"Metrics counters threshold was set to %d", KEYISOP_logCountThreshold);
     } 
 }
 
@@ -293,6 +304,7 @@ static void KeyIso_upload_and_clear_counters(
             NULL,
             0,
             KEYISOP_IsolationSolution,
+            KEYISOP_KeysInUseLibraryLoaded,
             title,
             NULL,
             "Success rate of %s operation is %.2f%%.  Num of successful operations:%d.  Num of total operations:%d.",
@@ -305,6 +317,7 @@ static void KeyIso_upload_and_clear_counters(
             NULL,
             0,
             KEYISOP_IsolationSolution,
+            KEYISOP_KeysInUseLibraryLoaded,
             title,
             NULL,
             "Average measurement time of %s operation is %f out of %d operations.",
@@ -422,7 +435,7 @@ static int _KeyIsoP_get_cpu_stats(int isPrev)
     // Read the overall cpu stats
     FILE *fstat = fopen("/proc/stat", "r");
     if (fstat == NULL) {
-        KEYISOP_trace_metric_error(NULL, 0, KEYISOP_IsolationSolution, title, NULL, "Error opening /proc/stat file");
+        KEYISOP_trace_metric_error(NULL, 0, KEYISOP_IsolationSolution, KEYISOP_KeysInUseLibraryLoaded, title, NULL, "Error opening /proc/stat file");
         return -1;
     }
 
@@ -431,7 +444,7 @@ static int _KeyIsoP_get_cpu_stats(int isPrev)
     snprintf(fileName, sizeof(fileName) - 1, "/proc/%d/stat", pid);
     FILE* fpstat = fopen(fileName,"r");
     if(fpstat == NULL) {
-      KEYISOP_trace_metric_error_para(NULL, 0, KEYISOP_IsolationSolution, title, NULL, "Error opening file", "file:%s", fileName);
+      KEYISOP_trace_metric_error_para(NULL, 0, KEYISOP_IsolationSolution, KEYISOP_KeysInUseLibraryLoaded, title, NULL, "Error opening file", "file:%s", fileName);
       fclose(fstat);
       return -1;
     }
@@ -444,7 +457,7 @@ static int _KeyIsoP_get_cpu_stats(int isPrev)
                 &snap->stimeTicks,
                 &snap->cutimeTicks,
                 &snap->cstimeTicks) == EOF) {
-		KEYISOP_trace_metric_error_para(NULL, 0, KEYISOP_IsolationSolution, title, NULL, "Error reading from file", "file:%s", fileName);
+		KEYISOP_trace_metric_error_para(NULL, 0, KEYISOP_IsolationSolution, KEYISOP_KeysInUseLibraryLoaded, title, NULL, "Error reading from file", "file:%s", fileName);
         fclose(fstat);
         fclose(fpstat);
         return -1;
@@ -457,7 +470,7 @@ static int _KeyIsoP_get_cpu_stats(int isPrev)
                 &cpu_time[0], &cpu_time[1], &cpu_time[2], &cpu_time[3],
                 &cpu_time[4], &cpu_time[5], &cpu_time[6], &cpu_time[7],
                 &cpu_time[8], &cpu_time[9]) == EOF) {
-        KEYISOP_trace_metric_error(NULL, 0, KEYISOP_IsolationSolution, title, NULL, "Error reading from /proc/stat file");
+        KEYISOP_trace_metric_error(NULL, 0, KEYISOP_IsolationSolution, KEYISOP_KeysInUseLibraryLoaded, title, NULL, "Error reading from /proc/stat file");
         fclose(fstat);
         return -1;
     }
@@ -477,7 +490,7 @@ static void KeyIsoP_cpu_measure(int signum)
     double ucpuUsage, scpuUsage;
 
     if (_KeyIsoP_get_cpu_stats(0) == -1){
-        KEYISOP_trace_metric_error(NULL, 0, KEYISOP_IsolationSolution, title, NULL, "Failed to calculate CPU stats");
+        KEYISOP_trace_metric_error(NULL, 0, KEYISOP_IsolationSolution, KEYISOP_KeysInUseLibraryLoaded, title, NULL, "Failed to calculate CPU stats");
         return;
     }
     
@@ -487,6 +500,7 @@ static void KeyIsoP_cpu_measure(int signum)
             NULL,
             0,
             KEYISOP_IsolationSolution,
+            KEYISOP_KeysInUseLibraryLoaded,
             title,
             NULL,
             "CPU usage - u_cpu:%f%%  s_cpu:%f%%",

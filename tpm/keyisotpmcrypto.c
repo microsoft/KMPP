@@ -48,12 +48,12 @@ int KeyIso_TPM_rsa_private_decrypt(
     const unsigned char *from,
     unsigned int tlen,
     unsigned char *to,
-    int padding)
+    int padding,
+    int labelLen)
 {
     const char* title = KEYISOP_TPM_RSA_PRIV_DEC_TITLE;
     int ret = -1;
     TSS2_RC r;
-    TPM2B_DATA label = { .size = 0 };
     TPM2B_PUBLIC_KEY_RSA *message = NULL;
     TPMT_RSA_DECRYPT inScheme;
     
@@ -70,6 +70,16 @@ int KeyIso_TPM_rsa_private_decrypt(
 
     memcpy(&cipher.buffer[0], from, flen);
 
+    // Copy the last labelLen chars into label
+    TPM2B_DATA label = { .size = labelLen };
+    if (labelLen > 0) {
+        if (labelLen > sizeof(label.buffer)) {
+            KEYISOP_trace_log_error_para(correlationId, 0, title, "rsa private decrypt failed", "invalid label len", "labelLen:%d", labelLen);
+            return ret;
+        }
+        memcpy(&label.buffer[0], from + flen, labelLen);
+    }
+    
     switch (padding) {
         case RSA_PKCS1_PADDING:
             inScheme.scheme = TPM2_ALG_RSAES;

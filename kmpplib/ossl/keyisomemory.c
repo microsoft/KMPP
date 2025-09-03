@@ -71,6 +71,13 @@ char *KeyIso_strndup(
     return OPENSSL_strndup(str, maxStrLen);
 }
 
+unsigned char *KeyIso_memdup(
+    const void *src,
+    size_t len)
+{
+    return OPENSSL_memdup(src, len);
+}
+
 ////~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~////
 ////            NOT TO USE FUNCTIONS - backward compatibility reasons only  !!!!!!!                  ////
 ////~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~////

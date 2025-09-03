@@ -12,7 +12,7 @@ int KeyIso_client_msg_handler_init_key(
     KEYISO_KEY_CTX *keyCtx,
     int keyLength,
     const unsigned char *keyBytes,
-    const char *salt);
+    const char *clientData);
 
 void KeyIso_client_msg_handler_free_keyCtx(
     KEYISO_KEY_CTX *keyCtx);
@@ -27,7 +27,8 @@ int KeyIso_client_msg_rsa_private_encrypt_decrypt(
     const unsigned char *from,
     int tlen,
     unsigned char *to,
-    int padding);
+    int padding,
+    int labelLen);
 
 int KeyIso_client_msg_ecdsa_sign(
     KEYISO_KEY_CTX *keyCtx,
@@ -45,7 +46,8 @@ int KeyIso_client_msg_import_symmetric_key(
     const unsigned char *inKeyBytes,
     const unsigned char *inImportKeyId,
     unsigned int *outKeyLength, 
-    unsigned char **outKeyBytes);
+    unsigned char **outKeyBytes,
+    char **outClientData);
 
 int KeyIso_client_msg_symmetric_key_encrypt_decrypt(
     KEYISO_KEY_CTX *keyCtx,
@@ -60,7 +62,7 @@ int KeyIso_client_msg_import_private_key(
     int keyType,
     const unsigned char *inKeyBytes,
     X509_SIG **outEncKey,
-    char **outSalt);
+    KEYISO_CLIENT_DATA_ST **outClientData);
 
 int KeyIso_client_msg_generate_rsa_key_pair(
     const uuid_t correlationId,
@@ -68,7 +70,7 @@ int KeyIso_client_msg_generate_rsa_key_pair(
     uint8_t keyUsage, 
     EVP_PKEY **outPubKey,
     X509_SIG **outEncryptedPkeyP8,
-    char **outSalt);
+    KEYISO_CLIENT_METADATA_HEADER_ST  *outMetaData);
 
 int KeyIso_client_msg_generate_ec_key_pair(
     const uuid_t correlationId,
@@ -77,7 +79,7 @@ int KeyIso_client_msg_generate_ec_key_pair(
     EC_GROUP **outEcGroup,
     EC_KEY **outPubKey,
     X509_SIG **outEncryptedPkeyP8,
-    char **outSalt);
+   KEYISO_CLIENT_METADATA_HEADER_ST  *outMetaData);
 
 void KeyIso_client_set_config(
     const KEYISO_CLIENT_CONFIG_ST *config);

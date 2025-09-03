@@ -35,7 +35,7 @@ int KeyIso_import_pfx(
     int *verifyChainError,
     int *pfxLength,
     unsigned char **pfxBytes,         // KeyIso_clear_free()
-    char **salt);                     // KeyIso_clear_free_string()
+    char **outClientData);          // Base64 encoded string
 
 // Return:
 //  +1 - Success with complete chain of certificates to a trusted root
@@ -88,8 +88,8 @@ int KeyIso_create_self_sign_pfx(
     int keyisoFlags,
     const char *confStr,
     int *pfxLength,
-    unsigned char **pfxBytes,           // KeyIso_clear_free()
-    char **salt);                       // KeyIso_clear_free_string()
+    unsigned char **pfxBytes,       // KeyIso_clear_free()
+    char **outClientData);          // Base64 encoded string
 
 // Returns 1 for success and 0 for an error
 int KeyIso_create_self_sign_pfx_to_key_id(
@@ -106,12 +106,12 @@ int KeyIso_replace_pfx_certs(
     int keyisoFlags,
     int inPfxLength,
     const unsigned char *inPfxBytes,
-    const char *inSalt,
+    const char *inClientData,
     int pemCertLength,
     const unsigned char *pemCertBytes,
     int *outPfxLength,
-    unsigned char **outPfxBytes,        // KeyIso_clear_free()
-    char **outSalt);                    // KeyIso_clear_free_string()
+    unsigned char **outPfxBytes,    // KeyIso_clear_free()
+    char **outClientData);          // Base64 encoded string
 
 // Returns 1 for success and 0 for an error
 int KeyIso_replace_key_id_certs(
@@ -148,8 +148,8 @@ int KeyIso_import_pfx_from_pem(
     const char *password,             			// Optional
     int *verifyChainError,
     int *outPfxLength,
-    unsigned char **outPfxBytes,      			// KeyIso_free()
-    char **salt);
+    unsigned char **outPfxBytes,     // KeyIso_free()
+    char **outClientData);          // Base64 encoded string
 
 // Return:
 //  +1 - Success with complete chain of certificates to a trusted root

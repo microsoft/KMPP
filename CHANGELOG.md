@@ -1,3 +1,13 @@
+# Version 3.1.0
+- Process Based Key Rotation - Async support
+- Symmetric Key BC Support
+- OpenSSL Provider - ECC key
+- Bug fixes
+
+# Version 3.0.0
+- Security enhancements 
+- Added backward compatibility support for any version key by clients across all supported versions, provided the service supports the specific version key
+
 # Version 2.1.0
 
 - KMPP provider as an OpenSSL 3.x default provider 

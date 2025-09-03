@@ -9,7 +9,14 @@
 
 #ifdef  __cplusplus
 extern "C" {
-#endif 
+#endif
+
+
+// Smallest supported curve is P192 => 24 * 2 byte SymCrypt signatures
+#define KMPP_ECDSA_MIN_SYMCRYPT_SIGNATURE_LEN 48
+// Largest supported curve is P521 => 66 * 2 byte SymCrypt signatures
+#define KMPP_ECDSA_MAX_SYMCRYPT_SIGNATURE_LEN 132
+
 
 /*
 *    Structures
@@ -39,6 +46,14 @@ int32_t KeyIso_get_expected_hash_length(
 int32_t KeyIso_get_curve_nid_from_symcrypt_curve(
     const uuid_t correlationId,
     PCSYMCRYPT_ECURVE pCurve);
+
+// Initializes static variables
+int KEYISO_EC_init_static(void);
+void KEYISO_EC_free_static(void);
+
+PSYMCRYPT_ECURVE KeyIso_get_curve_by_nid(
+    const uuid_t correlationId,
+    uint32_t groupNid);
 
 #ifdef  __cplusplus
 }

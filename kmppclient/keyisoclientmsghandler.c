@@ -57,7 +57,21 @@ IPC_REPLY_ST* KeyIso_send_ipc(KEYISO_KEY_CTX *keyCtx, IPC_SEND_RECEIVE_ST *ipcSt
 
     // The following log allow us validate the estimated length for each structure
     size_t estimateOutLen = KeyIso_get_estimate_out_len(ipcSt->command, ipcSt);
-    KEYISOP_trace_log_para(keyCtx->correlationId, 0, KEYISOP_IPC_CLIENT_TITLE, "in-proc", "outLen: %d. estimateOutLen: %d", outLen, estimateOutLen);
+    KEYISOP_trace_log_para(keyCtx->correlationId, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_IPC_CLIENT_TITLE, "in-proc", "outLen: %d. estimateOutLen: %d", outLen, estimateOutLen);
+    if (outLen != estimateOutLen) {
+        // The outLen does not match the estimateOutLen, most of the times this is an error while running the in-proc handler.
+        // However, in some cases, the estimated length is larger than the actual out length.
+        // For example, in ECDSA sign, the calculation of the dynamic length may not match the actual length since the calculation takes
+        // the maximum possible value using ECDSA_size().
+        KEYISOP_trace_log_error(keyCtx->correlationId, 0, KEYISOP_IPC_CLIENT_TITLE, "in-proc", "outLen does not match estimateOutLen");
+        if (outLen > estimateOutLen) {
+            // The estimateOutLen is smaller than the outLen, this is an error.
+            KEYISOP_trace_log_error_para(keyCtx->correlationId, 0, KEYISOP_IPC_CLIENT_TITLE, "in-proc", "outLen is smaller than estimateOutLen", "outLen: %d, estimateOutLen: %d", outLen, estimateOutLen);
+            *result = IPC_FAILURE;
+            KeyIso_free(response);
+            return NULL;
+        }
+    }
 
     IPC_REPLY_ST *reply = (IPC_REPLY_ST *)KeyIso_zalloc(sizeof(IPC_REPLY_ST) + outLen);
     if (reply == NULL) {
@@ -164,10 +178,16 @@ static void _fill_header(KEYISO_INPUT_HEADER_ST *header, IpcCommand command, con
     memcpy(header->correlationId, correlationId, CORRELATION_ID_LEN);
 }
 
+static void _fill_client_data(KEYISO_CLIENT_METADATA_HEADER_ST *header, KEYISO_CLIENT_DATA_ST *clientData)
+{
+    // Fill the data about the key 
+    header->version = clientData->keyIdHeader.keyServiceVersion;
+    header->isolationSolution = clientData->keyIdHeader.isolationSolution;
+}
+
 /////////////////////////////
 /*   Encrypted key        */
 ////////////////////////////
-
 static int _cleanup_encrypted_key_from_key_bytes(
     int ret,
     const char *loc,
@@ -183,12 +203,17 @@ static int _cleanup_encrypted_key_from_key_bytes(
     return ret;
 }
 
-static int _get_encrypted_key_from_key_bytes(const KEYISO_KEY_CTX *keyCtx, KEYISO_ENCRYPTED_PRIV_KEY_ST **outEncKey)
+static int _get_opaque_key_from_key_ctx(const KEYISO_KEY_CTX *keyCtx, unsigned char **opaqueEncKey, uint32_t *opaqueEncKeyLen)
 {
     // Convert pfxBytes to PKCS12 and parse to X509SIG (p8)
     X509_SIG* p8 = NULL;
     int ret = STATUS_FAILED;
     KEYISO_KEY_DETAILS* keyDetails = NULL;
+
+    if (!opaqueEncKey || !opaqueEncKeyLen)
+        return STATUS_FAILED;
+    *opaqueEncKey = NULL;
+    *opaqueEncKeyLen = 0;
 
     if (!keyCtx)
         return _cleanup_encrypted_key_from_key_bytes(ret, "keyCtx", "Invalid key context", NULL, p8);
@@ -201,14 +226,13 @@ static int _get_encrypted_key_from_key_bytes(const KEYISO_KEY_CTX *keyCtx, KEYIS
     if (ret != STATUS_OK)
         return _cleanup_encrypted_key_from_key_bytes(ret, "p8", "PFX parsing failed", keyCtx->correlationId, p8);   
         
-    // Convert to encrypted key structure - KEYISO_ENCRYPTED_PRIV_KEY_ST
-    ret = KeyIso_create_enckey_from_p8(p8, outEncKey);
+    // Convert to encrypted opaque key
+    ret = KeyIso_create_enckey_from_p8((const X509_SIG *)p8, opaqueEncKeyLen, opaqueEncKey);
     if (ret != STATUS_OK)
         return _cleanup_encrypted_key_from_key_bytes(ret, "enckey", "Creation failed", keyCtx->correlationId, p8);
 
     return _cleanup_encrypted_key_from_key_bytes(ret, "", "", keyCtx->correlationId, p8);
 }
-
 
 //////////////////////////
 /*  RSA Encrypt Decrypt */
@@ -226,7 +250,7 @@ static const char* _get_rsa_enc_dec_title(int value) {
 }
 
 static KEYISO_RSA_PRIVATE_ENC_DEC_IN_ST* _create_rsa_private_encrypt_decrypt_message(const KEYISO_KEY_CTX *keyCtx,
-    int decrypt, int flen, const unsigned char *from, int tlen, int padding, size_t *structSize) 
+    int decrypt, int flen, const unsigned char *from, int tlen, int padding, int labelLen, size_t *structSize) 
 {
     if (!structSize || !keyCtx || !from)
         return NULL;
@@ -236,9 +260,11 @@ static KEYISO_RSA_PRIVATE_ENC_DEC_IN_ST* _create_rsa_private_encrypt_decrypt_mes
         return NULL;
     }
     
-    // OAEP -The labelLen will need to be added to the size calculation
-    const uint32_t labelLen = 0;
-    size_t dynamicLen = KeyIso_get_rsa_enc_dec_params_dynamic_len(flen, labelLen);
+    uint32_t dynamicLen = 0;
+    if (KeyIso_get_rsa_enc_dec_params_dynamic_len(flen, labelLen, &dynamicLen) != STATUS_OK) {
+        KEYISOP_trace_log_error(keyCtx->correlationId, 0, _get_rsa_enc_dec_title(decrypt), "KeyIso_get_rsa_enc_dec_params_dynamic_len", "Failed to get dynamic length");
+        return NULL;
+    }
     *structSize = GET_DYNAMIC_STRUCT_SIZE(KEYISO_RSA_PRIVATE_ENC_DEC_IN_ST, dynamicLen); 
     KEYISO_RSA_PRIVATE_ENC_DEC_IN_ST* inSt = (KEYISO_RSA_PRIVATE_ENC_DEC_IN_ST *)KeyIso_zalloc(*structSize);
     if (inSt == NULL)
@@ -247,14 +273,12 @@ static KEYISO_RSA_PRIVATE_ENC_DEC_IN_ST* _create_rsa_private_encrypt_decrypt_mes
     _fill_header(&inSt->headerSt, IpcCommand_RsaPrivateEncryptDecrypt, keyCtx->correlationId);
     
     inSt->keyId = keyDetails->keyId;
-    // OAEP - The label needs to be filled here once the client will support provider and keycontext will hold the label
-    // currently label len is set to and the dynamic array holds only `from` bytes
     KeyIso_fill_rsa_enc_dec_param(&inSt->params, decrypt, padding, tlen, flen, labelLen, from); 
     return inSt;
 }
 
-static uint8_t* _create_and_serialize_rsa_private_encrypt_decrypt_message(const KEYISO_KEY_CTX *keyCtx,
-    int decrypt, int flen, const unsigned char *from, int tlen, int padding, size_t *msgLen) 
+static uint8_t* _create_and_serialize_rsa_private_encrypt_decrypt_message(const KEYISO_KEY_CTX *keyCtx, int decrypt, 
+    int flen, const unsigned char *from, int tlen, int padding, int labelLen, size_t *msgLen) 
 {        
     if (!msgLen)
         return NULL;
@@ -262,7 +286,7 @@ static uint8_t* _create_and_serialize_rsa_private_encrypt_decrypt_message(const 
 
     //1. Create struct
     size_t structSize = 0;
-    KEYISO_RSA_PRIVATE_ENC_DEC_IN_ST* inSt = _create_rsa_private_encrypt_decrypt_message(keyCtx, decrypt, flen, from, tlen, padding ,&structSize);
+    KEYISO_RSA_PRIVATE_ENC_DEC_IN_ST* inSt = _create_rsa_private_encrypt_decrypt_message(keyCtx, decrypt, flen, from, tlen, padding, labelLen, &structSize);
     if (inSt == NULL)
         return NULL;
          
@@ -331,8 +355,18 @@ static int _cp_if_valid(const uuid_t correlationId, uint8_t* toBytes, int32_t  b
 
 
 // RSA Encrypt Decrypt with Encrypted Key
-static KEYISO_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY_IN_ST* _create_rsa_private_encrypt_decrypt_with_attached_key_message(
-    const KEYISO_KEY_CTX *keyCtx, int decrypt, int flen, const unsigned char *from, int tlen, int padding, size_t *totalStSize) 
+static KEYISO_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY_IN_ST* _cleanup_rsa_private_encrypt_decrypt_with_attached_key(
+                                                                    unsigned char* opaqueEncKey,
+                                                                    KEYISO_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY_IN_ST* inSt) {
+    KeyIso_free(opaqueEncKey);
+    return inSt;
+}
+
+#define _CLEANUP_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY(inSt) \
+    _cleanup_rsa_private_encrypt_decrypt_with_attached_key(opaqueEncKey, inSt)
+
+static KEYISO_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY_IN_ST* _create_rsa_private_encrypt_decrypt_with_attached_key_message(const KEYISO_KEY_CTX *keyCtx,
+    int decrypt, int flen, const unsigned char *from, int tlen, int padding, int labelLen, size_t *totalStSize) 
 {
     if (!totalStSize || !keyCtx || !from) {
         return NULL;
@@ -344,75 +378,79 @@ static KEYISO_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY_IN_ST* _create_rsa_private_e
         return NULL;
     }
 
-    // Get the encrypted key from the key bytes
-    KEYISO_ENCRYPTED_PRIV_KEY_ST *encKeySt = NULL;
-    int result = _get_encrypted_key_from_key_bytes(keyCtx, &encKeySt);
+    KEYISO_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY_IN_ST* inSt = NULL;
+    unsigned char* opaqueEncKey = NULL;
+    uint32_t opaqueEncKeyLen = 0;
+
+    // Get the encrypted key bytes
+    int result = _get_opaque_key_from_key_ctx(keyCtx, &opaqueEncKey, &opaqueEncKeyLen);
     if (result != STATUS_OK) {
-        KEYISOP_trace_log_error(keyCtx->correlationId, 0, KEYISOP_RSA_ENCRYPT_TITLE, "_get_encrypted_key_from_key_bytes failed", "Failed to get encrypted key from key bytes");
-        return NULL;
-    } 
+        KEYISOP_trace_log_error(keyCtx->correlationId, 0, KEYISOP_RSA_ENCRYPT_TITLE, "_get_opaque_key_from_key_ctx failed", "Failed to get encrypted key from key bytes");
+        return _CLEANUP_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY(NULL);
+    }
     
-    // OAEP - The label needs to be filled here once the client will support provider and keycontext will hold the label
-    // currently label len is set to 0 and the dynamic array holds  `from`  and encrypted key bytes
-    size_t dynamicLen = KeyIso_get_rsa_enc_dec_with_attached_key_in_dynamic_bytes_len(keyCtx->correlationId, encKeySt->saltLen, encKeySt->ivLen, encKeySt->hmacLen, encKeySt->encKeyLen, flen, 0);
-    if (dynamicLen == 0 || dynamicLen > UINT32_MAX) {
-        KeyIso_free(encKeySt);
-        KEYISOP_trace_log_error_para(keyCtx->correlationId, 0, KEYISOP_RSA_ENCRYPT_TITLE, "Invalid input", "Invalid dynamic length", "dynamicLen = %ld, flen = %d", dynamicLen, flen);
-        return NULL;
+    KEYISO_CLIENT_DATA_ST* clientData = (KEYISO_CLIENT_DATA_ST *)keyDetails->clientData;
+    if (!clientData) {
+        KEYISOP_trace_log_error(keyCtx->correlationId, 0, KEYISOP_RSA_ENCRYPT_TITLE, "Invalid client data", "");
+        return _CLEANUP_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY(NULL);
+    }
+
+    uint32_t dynamicLen = 0;
+    if (KeyIso_get_rsa_enc_dec_with_attached_key_in_dynamic_bytes_len(keyCtx->correlationId, clientData->pubKeyLen, opaqueEncKeyLen, flen, labelLen, &dynamicLen) != STATUS_OK) {
+        KEYISOP_trace_log_error(keyCtx->correlationId, 0, KEYISOP_RSA_ENCRYPT_TITLE, "KeyIso_get_rsa_enc_dec_with_attached_key_in_dynamic_bytes_len failed", "Failed to get dynamic length");
+        return _CLEANUP_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY(NULL);
     }
 
     size_t totalSize = GET_DYNAMIC_STRUCT_SIZE(KEYISO_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY_IN_ST, dynamicLen);
-    KEYISO_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY_IN_ST* inSt = (KEYISO_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY_IN_ST *)KeyIso_zalloc(totalSize);
+    if (totalSize == 0) {
+        KEYISOP_trace_log_error(keyCtx->correlationId, 0, KEYISOP_RSA_ENCRYPT_TITLE, "Invalid input", "Failed to calculate struct size");
+        return _CLEANUP_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY(NULL);
+    }
+    inSt = (KEYISO_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY_IN_ST *)KeyIso_zalloc(totalSize);
     if (inSt == NULL) {
-        KeyIso_free(encKeySt);
-        return NULL;   
+        // Memory allocation failed
+        return _CLEANUP_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY(NULL);
     } 
     
+    // Headers
     _fill_header(&inSt->headerSt, IpcCommand_RsaPrivateEncryptDecryptWithAttachedKey, keyCtx->correlationId);
-    
-    // Fill the open key details
-    inSt->algVersion = encKeySt->algVersion;
-    inSt->saltLen = encKeySt->saltLen;
-    inSt->ivLen = encKeySt->ivLen;
-    inSt->hmacLen = encKeySt->hmacLen;
-    inSt->encKeyLen = encKeySt->encKeyLen;
+    _fill_client_data(&inSt->clientDataHeader, clientData);
 
-    // Copy the encrypted key bytes
-    size_t encryptedKeySize = KeyIso_get_enc_key_bytes_len(keyCtx->correlationId, encKeySt->saltLen, encKeySt->ivLen, encKeySt->hmacLen, encKeySt->encKeyLen);
-    if (encryptedKeySize == 0) {
-        KEYISOP_trace_log_error(keyCtx->correlationId, 0, KEYISOP_OPEN_KEY_TITLE, "encryptedKeySize", "Invalid encrypted key size");
-        KeyIso_free(encKeySt);
-        KeyIso_free(inSt);
-        return NULL;
-    }
-    memcpy(inSt->bytes, encKeySt->encryptedKeyBytes, encryptedKeySize);
-    KeyIso_free(encKeySt);
-    encKeySt = NULL;
+    // Fill the key details
+    inSt->publicKeyLen = clientData->pubKeyLen;
+    inSt->opaqueEncryptedKeyLen = opaqueEncKeyLen;
 
     // Fill crypto operation details
     inSt->decrypt = decrypt;
     inSt->padding = padding;
     inSt->tlen = tlen;
     inSt->fromBytesLen = flen;
-    inSt->labelLen = 0; // OAEP - The label needs to be filled here once the client supports provider and key context holds the label
-    memcpy(inSt->bytes + encryptedKeySize, from, flen);
-    
-    // Copy the secret salt
-    const char* salt = keyDetails->salt;
-    size_t secretSaltLen = strlen(salt);
-    if (secretSaltLen >= KEYISO_SECRET_SALT_STR_BASE64_LEN) {
-        KEYISOP_trace_log_error(keyCtx->correlationId, 0, KEYISOP_OPEN_KEY_TITLE, "secretSalt", "Invalid secret salt length");  
-        KeyIso_free(inSt);
-        return NULL;
+    inSt->labelLen = labelLen;
+
+    // Copy the encrypted key and the data to be decrypted
+    uint32_t offset = 0;
+    if (clientData->pubKeyLen > 0) {
+        memcpy(inSt->data + offset, clientData->pubKeyBytes, clientData->pubKeyLen);
+        offset += clientData->pubKeyLen;
     }
-    memcpy(inSt->secretSalt, salt, secretSaltLen);
-    inSt->secretSalt[KEYISO_SECRET_SALT_STR_BASE64_LEN - 1] = '\0';
+    if (opaqueEncKeyLen > 0) {
+        memcpy(inSt->data + offset, opaqueEncKey, opaqueEncKeyLen);
+        offset += opaqueEncKeyLen;
+    }
+    if (flen > 0) {
+        memcpy(inSt->data + offset, from, flen);
+        offset += flen;
+    }
+    if (labelLen > 0) {
+        memcpy(inSt->data + offset, from, labelLen);
+    }
+    
     *totalStSize = totalSize;
-    return inSt;
+    return _CLEANUP_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY(inSt);
 }
 
 static uint8_t* _create_and_serialize_rsa_private_encrypt_decrypt_with_attached_key_message(const KEYISO_KEY_CTX *keyCtx,
-    int decrypt, int flen, const unsigned char *from, int tlen, int padding, size_t *msgLen) 
+    int decrypt, int flen, const unsigned char *from, int tlen, int padding, int labelLen, size_t *msgLen) 
 {        
     if (!msgLen)
         return NULL;
@@ -420,7 +458,7 @@ static uint8_t* _create_and_serialize_rsa_private_encrypt_decrypt_with_attached_
 
     //1. Create struct
     size_t structSize = 0;
-    KEYISO_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY_IN_ST* inSt = _create_rsa_private_encrypt_decrypt_with_attached_key_message(keyCtx, decrypt, flen, from, tlen, padding, &structSize);
+    KEYISO_RSA_PRIVATE_ENC_DEC_WITH_ATTACHED_KEY_IN_ST* inSt = _create_rsa_private_encrypt_decrypt_with_attached_key_message(keyCtx, decrypt, flen, from, tlen, padding, labelLen, &structSize);
     if (inSt == NULL)
         return NULL;
  
@@ -439,13 +477,13 @@ static uint8_t* _create_and_serialize_rsa_private_encrypt_decrypt_with_attached_
     return msgBuf;
 }
 
-static int _handle_rsa_private_encrypt_decrypt_message_with_attached_key(KEYISO_KEY_CTX *keyCtx,
-    int decrypt, int flen, const unsigned char *from, int tlen, unsigned char *to, int padding)
+static int _handle_rsa_private_encrypt_decrypt_message_with_attached_key(KEYISO_KEY_CTX *keyCtx, int decrypt, 
+    int flen, const unsigned char *from, int tlen, unsigned char *to, int padding, int labelLen)
 {
     //1. Create the structure and encode it
     size_t msgLen = 0;
     uint32_t command = IpcCommand_RsaPrivateEncryptDecryptWithAttachedKey;
-    uint8_t *msgBuf = _create_and_serialize_rsa_private_encrypt_decrypt_with_attached_key_message(keyCtx, decrypt, flen, from, tlen, padding, &msgLen);
+    uint8_t *msgBuf = _create_and_serialize_rsa_private_encrypt_decrypt_with_attached_key_message(keyCtx, decrypt, flen, from, tlen, padding, labelLen, &msgLen);
              
     //2. Send to the server as a generic message
     int result;
@@ -496,13 +534,13 @@ static int _handle_rsa_private_encrypt_decrypt_message_with_attached_key(KEYISO_
 }
 
 
-static int _handle_rsa_private_encrypt_decrypt_message(KEYISO_KEY_CTX *keyCtx,
-    int decrypt, int flen, const unsigned char *from, int tlen, unsigned char *to, int padding)
+static int _handle_rsa_private_encrypt_decrypt_message(KEYISO_KEY_CTX *keyCtx, int decrypt, int flen,
+    const unsigned char *from, int tlen, unsigned char *to, int padding, int labelLen)
 {   
     //1. Create the structure and encode it
     size_t msgLen = 0;
     const uint32_t command = IpcCommand_RsaPrivateEncryptDecrypt;
-    uint8_t *msgBuf = _create_and_serialize_rsa_private_encrypt_decrypt_message(keyCtx, decrypt, flen, from, tlen, padding, &msgLen);
+    uint8_t *msgBuf = _create_and_serialize_rsa_private_encrypt_decrypt_message(keyCtx, decrypt, flen, from, tlen, padding, labelLen, &msgLen);
    
     //2. Send to the server as a generic message
     int result;
@@ -536,7 +574,7 @@ static int _handle_rsa_private_encrypt_decrypt_message(KEYISO_KEY_CTX *keyCtx,
                             KeyIso_free(outSt);
                             KeyIso_free(reply->outSt);
                             KeyIso_free(reply);
-                            return _handle_rsa_private_encrypt_decrypt_message_with_attached_key(keyCtx, decrypt, flen, from, tlen, to, padding);
+                            return _handle_rsa_private_encrypt_decrypt_message_with_attached_key(keyCtx, decrypt, flen, from, tlen, to, padding, labelLen);
 
                         } else if (_cp_if_valid(keyCtx->correlationId, outSt->toBytes, outSt->bytesLen, to, tlen) == STATUS_OK) {                            
                             actualLen = outSt->bytesLen;
@@ -586,6 +624,17 @@ static KEYISO_ECDSA_SIGN_IN_ST* _create_ecdsa_sign_message(const KEYISO_KEY_CTX 
     return inSt;
 }
 
+static KEYISO_ECDSA_SIGN_WITH_ATTACHED_KEY_IN_ST* _cleanup_ecdsa_sign_with_attached_key(
+    unsigned char* opaqueEncKey,
+    KEYISO_ECDSA_SIGN_WITH_ATTACHED_KEY_IN_ST* inSt)
+{
+    KeyIso_free(opaqueEncKey);
+    return inSt;
+}
+
+#define _CLEANUP_ECDSA_SIGN_WITH_ATTACHED_KEY(inSt) \
+    _cleanup_ecdsa_sign_with_attached_key(opaqueEncKey, inSt)
+
 static KEYISO_ECDSA_SIGN_WITH_ATTACHED_KEY_IN_ST* _create_ecdsa_sign_with_attached_key_message(const KEYISO_KEY_CTX *keyCtx,
     int type, const unsigned char *dgst, int dlen, unsigned int sigLen, size_t *structSize)
 {   
@@ -597,57 +646,76 @@ static KEYISO_ECDSA_SIGN_WITH_ATTACHED_KEY_IN_ST* _create_ecdsa_sign_with_attach
         return NULL;
     }
     
-     // Get the encrypted key from the key bytes
-    KEYISO_ENCRYPTED_PRIV_KEY_ST  *encKeySt = NULL;
-    int result = _get_encrypted_key_from_key_bytes(keyCtx, &encKeySt);
+    const char* title = KEYISOP_ECC_SIGN_TITLE;
+    unsigned char *opaqueEncKey = NULL;
+    KEYISO_CLIENT_DATA_ST* clientData = NULL;
+    KEYISO_ECDSA_SIGN_WITH_ATTACHED_KEY_IN_ST* inSt = NULL;
+    
+    // Get the encrypted key from the key bytes
+    uint32_t opaqueEncKeyLen = 0;
+    int result = _get_opaque_key_from_key_ctx(keyCtx, &opaqueEncKey, &opaqueEncKeyLen);
     if (result != STATUS_OK) {
-        KEYISOP_trace_log_error(keyCtx->correlationId, 0, KEYISOP_RSA_ENCRYPT_TITLE, "_get_encrypted_key_from_key_bytes failed", "Failed to get encrypted key from key bytes");
-        return NULL;
+        KEYISOP_trace_log_error(keyCtx->correlationId, 0, title, "_get_opaque_key_from_key_ctx failed", "Failed to get encrypted key from key bytes");
+        return _CLEANUP_ECDSA_SIGN_WITH_ATTACHED_KEY(NULL);
     } 
 
-    // calculate the struct size
-    size_t dynamicLen = KeyIso_get_ecdsa_sign_with_attached_key_in_dynamic_bytes_len(keyCtx->correlationId, encKeySt->saltLen, encKeySt->ivLen, encKeySt->hmacLen, encKeySt->encKeyLen, dlen);
-     if (dynamicLen == 0 || dynamicLen <= dlen) {
-        KeyIso_free(encKeySt);
-        KEYISOP_trace_log_error_para(keyCtx->correlationId, 0, KEYISOP_RSA_ENCRYPT_TITLE, "Invalid input", "Invalid dynamic length", "dynamicLen = %ld, dlen = %d", dynamicLen, dlen);
-        return NULL;
-    }
-    size_t totalSize = GET_DYNAMIC_STRUCT_SIZE(KEYISO_ECDSA_SIGN_WITH_ATTACHED_KEY_IN_ST, dynamicLen);
-    *structSize = totalSize;
-    KEYISO_ECDSA_SIGN_WITH_ATTACHED_KEY_IN_ST* inSt = (KEYISO_ECDSA_SIGN_WITH_ATTACHED_KEY_IN_ST *)KeyIso_zalloc(*structSize);
-    if (inSt == NULL) {
-        KeyIso_free(encKeySt);
-        *structSize = 0;
-        return NULL;
+    clientData = (KEYISO_CLIENT_DATA_ST *)keyDetails->clientData;
+    if (!clientData) {
+        KEYISOP_trace_log_error(keyCtx->correlationId, 0, KEYISOP_RSA_ENCRYPT_TITLE, "Invalid client data", "");
+        return _CLEANUP_ECDSA_SIGN_WITH_ATTACHED_KEY(NULL); 
     }
 
+    // Calculate the struct size
+    uint32_t dynamicLen = 0;
+    if (KeyIso_get_ecdsa_sign_with_attached_key_in_dynamic_bytes_len(keyCtx->correlationId, clientData->pubKeyLen, opaqueEncKeyLen, dlen, &dynamicLen) != STATUS_OK) {
+        KEYISOP_trace_log_error(keyCtx->correlationId, 0, title, "KeyIso_get_ecdsa_sign_with_attached_key_in_dynamic_bytes_len failed", "Failed to get dynamic length");
+        return _CLEANUP_ECDSA_SIGN_WITH_ATTACHED_KEY(NULL);
+    }
+
+    size_t totalSize = GET_DYNAMIC_STRUCT_SIZE(KEYISO_ECDSA_SIGN_WITH_ATTACHED_KEY_IN_ST, dynamicLen);
+    *structSize = totalSize;
+    if (totalSize == 0) {
+        KEYISOP_trace_log_error(keyCtx->correlationId, 0, title, "Invalid input", "Failed to calculate struct size");
+        return _CLEANUP_ECDSA_SIGN_WITH_ATTACHED_KEY(NULL);
+    }
+    
+    inSt = (KEYISO_ECDSA_SIGN_WITH_ATTACHED_KEY_IN_ST *)KeyIso_zalloc(*structSize);
+    if (inSt == NULL) {
+        *structSize = 0;
+        return _CLEANUP_ECDSA_SIGN_WITH_ATTACHED_KEY(NULL);
+    }
+
+    // Fill the headers
     _fill_header(&inSt->headerSt, IpcCommand_EcdsaSignWithAttachedKey, keyCtx->correlationId);
-    inSt->algVersion = encKeySt->algVersion;
-    inSt->saltLen = encKeySt->saltLen;
-    inSt->ivLen = encKeySt->ivLen;
-    inSt->hmacLen = encKeySt->hmacLen;
-    inSt->encKeyLen = encKeySt->encKeyLen;
-    size_t encryptedKeySize = dynamicLen - dlen;
-    memcpy(inSt->bytes, encKeySt->encryptedKeyBytes, encryptedKeySize);
+    _fill_client_data(&inSt->clientDataHeader, clientData);
+
+    // Fill the key details
+    inSt->publicKeyLen = clientData->pubKeyLen;
+    inSt->opaqueEncryptedKeyLen = opaqueEncKeyLen;
+
+    // Fill crypto operation details
     inSt->type = type;
     inSt->sigLen = sigLen;
     inSt->digestLen = dlen;
-    memcpy(inSt->bytes + encryptedKeySize, dgst, dlen);
-
-    KeyIso_free(encKeySt);
-    encKeySt = NULL;
     
-    // Copy the secret salt
-    const char* salt = keyDetails->salt;
-    size_t secretSaltLen = strlen(salt);
-    if (secretSaltLen >= KEYISO_SECRET_SALT_STR_BASE64_LEN) {
-        KEYISOP_trace_log_error(0, 0, KEYISOP_OPEN_KEY_TITLE, "secretSalt", "Invalid secret salt length");  
-        return NULL;
+    // Copy components in order: pubkey, enckey, digest
+    uint32_t offset = 0;
+    if (clientData->pubKeyLen > 0) {
+        memcpy(inSt->data + offset, clientData->pubKeyBytes, clientData->pubKeyLen);
+        offset += clientData->pubKeyLen;
     }
-    memcpy(inSt->secretSalt, salt, secretSaltLen);
-    inSt->secretSalt[KEYISO_SECRET_SALT_STR_BASE64_LEN - 1] = '\0';
-
-    return inSt;
+    
+    if (opaqueEncKeyLen > 0) {
+        memcpy(inSt->data + offset, opaqueEncKey, opaqueEncKeyLen);
+        offset += opaqueEncKeyLen;
+    }
+    
+    if (dlen > 0) {
+        memcpy(inSt->data + offset, dgst, dlen);
+        offset += dlen;
+    }
+    
+    return _CLEANUP_ECDSA_SIGN_WITH_ATTACHED_KEY(inSt);
 }
 
 static uint8_t* _create_and_serialize_ecdsa_sign_message(const KEYISO_KEY_CTX *keyCtx,
@@ -969,55 +1037,17 @@ static void _handle_close_key_message(KEYISO_KEY_CTX *keyCtx)
 //////////////////////////
 /*  Import private key  */
 //////////////////////////
-static int _cleanup_copy_encrypted_key_and_salt(const uuid_t correlationId, int ret, const char* loc, const char* message, KEYISO_ENCRYPTED_PRIV_KEY_ST *pEncKeySt, char *secretSalt)
-{
-    if (ret == STATUS_FAILED) {
-        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_IMPORT_KEY_TITLE, loc, message);
-        KeyIso_free(pEncKeySt);
-        KeyIso_free(secretSalt);
-    }
-    return ret;
-}
-
-#define _CLEANUP_COPY_ENCRYPTED_KEY_AND_SALT(ret, loc, message) \
-    _cleanup_copy_encrypted_key_and_salt(correlationId, ret, loc, message, pEncKeySt, secretSalt)
-
-static int _copy_encrypted_key_and_salt(const uuid_t correlationId, KEYISO_ENCRYPTED_PRIV_KEY_ST *encKeySt, const char *saltStr, KEYISO_ENCRYPTED_PRIV_KEY_ST **outEncKey, char **outSalt) 
-{
-    KEYISO_ENCRYPTED_PRIV_KEY_ST* pEncKeySt = NULL;
-    char *secretSalt = NULL;
-    size_t encryptedKeyBytesLen = KeyIso_get_enc_key_bytes_len(correlationId, encKeySt->saltLen, encKeySt->ivLen, encKeySt->hmacLen, encKeySt->encKeyLen);
-    size_t encKeyLen = GET_DYNAMIC_STRUCT_SIZE(KEYISO_ENCRYPTED_PRIV_KEY_ST, encryptedKeyBytesLen);
-                
-    pEncKeySt = (KEYISO_ENCRYPTED_PRIV_KEY_ST *) KeyIso_zalloc(encKeyLen);
-    secretSalt = (char *) KeyIso_zalloc(KEYISO_SECRET_SALT_STR_BASE64_LEN);
-    if (pEncKeySt == NULL || secretSalt == NULL) {
-        return _CLEANUP_COPY_ENCRYPTED_KEY_AND_SALT(STATUS_FAILED, "KeyIso_zalloc", "Allocation failed");
-    }
-
-    size_t secretSaltLen = strlen(saltStr);
-    if (secretSaltLen >= KEYISO_SECRET_SALT_STR_BASE64_LEN) {
-        return _CLEANUP_COPY_ENCRYPTED_KEY_AND_SALT(STATUS_FAILED, "secretSalt", "Invalid secret salt length");
-    }
-    memcpy(secretSalt, saltStr, secretSaltLen);
-    secretSalt[KEYISO_SECRET_SALT_STR_BASE64_LEN - 1] = '\0';
-    pEncKeySt->algVersion = encKeySt->algVersion;
-    pEncKeySt->saltLen = encKeySt->saltLen;
-    pEncKeySt->ivLen = encKeySt->ivLen;
-    pEncKeySt->hmacLen = encKeySt->hmacLen;
-    pEncKeySt->encKeyLen = encKeySt->encKeyLen;
-    memcpy(&pEncKeySt->encryptedKeyBytes, encKeySt->encryptedKeyBytes, encryptedKeyBytesLen);
-
-    *outSalt = secretSalt;
-    *outEncKey = pEncKeySt;
-
-    return _CLEANUP_COPY_ENCRYPTED_KEY_AND_SALT(STATUS_OK, NULL, NULL);
-}
+#define _CLEANUP_COPY_ENCRYPTED_KEY_AND_CLIENT_DATA(ret, loc, message) \
+    _cleanup_copy_encrypted_key_and_client_data(correlationId, ret, loc, message, pEncKeySt, clientData)
 
 // RSA functions
 static KEYISO_IMPORT_RSA_PRIV_KEY_IN_ST* _create_rsa_import_key_message(const uuid_t correlationId, KEYISO_RSA_PKEY_ST *rsaPrivateKey, size_t *structSize)
 {
-    size_t keyLen = KeyIso_get_rsa_pkey_bytes_len(rsaPrivateKey);
+    uint32_t keyLen = 0;
+    if (KeyIso_get_rsa_pkey_bytes_len(rsaPrivateKey, &keyLen) != STATUS_OK) {
+        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_IMPORT_KEY_TITLE, "Invalid input", "Failed to get rsa pkey bytes length");
+        return NULL;
+    }
     
     if (!structSize)
         return NULL;
@@ -1071,11 +1101,8 @@ static uint8_t* _create_and_serialize_rsa_import_key_message(const uuid_t correl
 bool KeyIso_is_valid_import_priv_key_out_structure(const uuid_t correlationId, const KEYISO_IMPORT_PRIV_KEY_OUT_ST* outSt, uint32_t receivedLen)
 {
     // Checking for integer overflow in the out structure dynamic array
-    uint32_t dynamicArrayLen = 0;
-    if(!KEYISO_ADD_OVERFLOW(outSt->encKeySt.saltLen, outSt->encKeySt.ivLen, &dynamicArrayLen) &&
-       !KEYISO_ADD_OVERFLOW(dynamicArrayLen, outSt->encKeySt.hmacLen, &dynamicArrayLen) && 
-       !KEYISO_ADD_OVERFLOW(dynamicArrayLen, outSt->encKeySt.encKeyLen, &dynamicArrayLen)) {
-
+    uint32_t dynamicArrayLen = outSt->opaqueEncryptedKeyLen + outSt->publicKeyLen;
+    if(dynamicArrayLen > 0 && dynamicArrayLen <= KMPP_MAX_MESSAGE_SIZE) {
         // Calculating the size of the out structure, where the dynamic array is already calculated in the above step
         size_t outStLenCalculation = GET_DYNAMIC_STRUCT_SIZE(KEYISO_IMPORT_PRIV_KEY_OUT_ST, dynamicArrayLen);
 
@@ -1084,15 +1111,47 @@ bool KeyIso_is_valid_import_priv_key_out_structure(const uuid_t correlationId, c
             return false;
         }
     } else {
-        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_IMPORT_KEY_TITLE, "KEYISO_ADD_OVERFLOW", "Integer overflow");
+        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_IMPORT_KEY_TITLE, "Invalid input", "dynamicArrayLen is invalid");
         return false;
     }
 
     return true;
 }
 
-static int _handle_rsa_import_private_key_message(const uuid_t correlationId, KEYISO_RSA_PKEY_ST *rsaPrivateKey,
-     KEYISO_ENCRYPTED_PRIV_KEY_ST **outEncKey, char **outSalt) 
+static int _copy_data(KEYISO_IMPORT_PRIV_KEY_OUT_ST *outSt, unsigned char **opaqueEncryptedKey, unsigned int *opaqueEncryptedKeyLen, KEYISO_CLIENT_DATA_ST** outClientData)
+{
+    if (outSt == NULL || opaqueEncryptedKey == NULL || opaqueEncryptedKeyLen == NULL || outClientData == NULL) {
+        return STATUS_FAILED;
+    }
+    *outClientData = NULL;
+    *opaqueEncryptedKey = NULL;
+    *opaqueEncryptedKeyLen = 0;
+
+
+    // Copy the client data
+    uint8_t *pubkeyBytes = (outSt->publicKeyLen > 0) ? outSt->data : NULL;
+    int ret = KeyIso_copy_client_data(NULL, outSt->headerSt.version, outSt->headerSt.isolationSolution, outSt->publicKeyLen, pubkeyBytes, outClientData);
+    if (ret != STATUS_OK) {
+        KeyIso_free(*opaqueEncryptedKey);
+        *opaqueEncryptedKey = NULL;
+        *opaqueEncryptedKeyLen = 0;
+    }
+
+    // Copy the opaque encrypted key
+    if (outSt->opaqueEncryptedKeyLen > 0) {
+        *opaqueEncryptedKeyLen = outSt->opaqueEncryptedKeyLen;
+        *opaqueEncryptedKey = (unsigned char *)KeyIso_zalloc(*opaqueEncryptedKeyLen);
+        if (*opaqueEncryptedKey == NULL) {
+            *opaqueEncryptedKeyLen = 0;
+            return STATUS_FAILED;
+        }
+        memcpy(*opaqueEncryptedKey, outSt->data + outSt->publicKeyLen, *opaqueEncryptedKeyLen);
+    }
+
+    return ret;
+}
+
+static int _handle_rsa_import_private_key_message(const uuid_t correlationId, KEYISO_RSA_PKEY_ST *rsaPrivateKey, KEYISO_CLIENT_DATA_ST **outClientData, unsigned int *opaqueEncryptedKeyLen, unsigned char **opaqueEncryptedKey) 
 {
     //1. Create the structure and encode it (if needed)
     size_t msgLen = 0;
@@ -1104,8 +1163,9 @@ static int _handle_rsa_import_private_key_message(const uuid_t correlationId, KE
     KeyIso_clear_free(msgBuf, msgLen);
 
     //3. Deserialize response and return relevant fields
-    *outEncKey = NULL;
-    *outSalt = NULL;
+    *outClientData = NULL;
+    *opaqueEncryptedKey = NULL;
+    *opaqueEncryptedKeyLen = 0;
 
     if (reply && (result == STATUS_OK)) {
         KEYISO_IMPORT_PRIV_KEY_OUT_ST* outSt = NULL;
@@ -1113,7 +1173,7 @@ static int _handle_rsa_import_private_key_message(const uuid_t correlationId, KE
         if (!isEncodingRequired) {
             outSt = (KEYISO_IMPORT_PRIV_KEY_OUT_ST*)reply->outSt;
             if (outSt && (outSt->headerSt.result == STATUS_OK) && KeyIso_is_valid_import_priv_key_out_structure(correlationId, outSt, reply->outLen))
-                result = _copy_encrypted_key_and_salt(correlationId, &outSt->encKeySt, (char*)&outSt->secretSalt, outEncKey, outSalt);
+                result = _copy_data(outSt, opaqueEncryptedKey, opaqueEncryptedKeyLen, outClientData);
             else
                 result = STATUS_FAILED;
         } else {
@@ -1124,7 +1184,7 @@ static int _handle_rsa_import_private_key_message(const uuid_t correlationId, KE
                 if (outSt != NULL) {
                     result = KeyIso_deserialize_import_rsa_priv_key_out(reply->outSt, reply->outLen, outSt);
                     if (result == STATUS_OK && outSt->headerSt.result == STATUS_OK)
-                        result = _copy_encrypted_key_and_salt(correlationId, &outSt->encKeySt, (char*)&outSt->secretSalt, outEncKey, outSalt);
+                        result = _copy_data(outSt, opaqueEncryptedKey, opaqueEncryptedKeyLen, outClientData);
                     else
                         result = STATUS_FAILED;
                     KeyIso_clear_free(outSt, sizeToAlloc);
@@ -1147,7 +1207,11 @@ static int _handle_rsa_import_private_key_message(const uuid_t correlationId, KE
 // EC functions
 static KEYISO_IMPORT_EC_PRIV_KEY_IN_ST* _create_ec_import_key_message(const uuid_t correlationId, KEYISO_EC_PKEY_ST *ecPrivateKey, size_t *structSize) 
 {
-    size_t keyLen = KeyIso_get_ec_pkey_bytes_len(ecPrivateKey);
+    uint32_t keyLen = 0;
+    if (KeyIso_get_ec_pkey_bytes_len(ecPrivateKey, &keyLen) != STATUS_OK) {
+        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_IMPORT_KEY_TITLE, "Invalid input", "Failed to get ec pkey bytes length");
+        return NULL;
+    }
     
     if (!structSize)
         return NULL;
@@ -1196,8 +1260,8 @@ static uint8_t* _create_and_serialize_ec_import_key_message(const uuid_t correla
     return msgBuf;
 }
 
-static int _handle_ec_import_private_key_message(const uuid_t correlationId, KEYISO_EC_PKEY_ST *ecPrivateKey, 
-    KEYISO_ENCRYPTED_PRIV_KEY_ST **outEncKey, char **outSalt) 
+static int _handle_ec_import_private_key_message(const uuid_t correlationId, KEYISO_EC_PKEY_ST *ecPrivateKey, KEYISO_CLIENT_DATA_ST **outClientData, unsigned int *opaqueEncryptedKeyLen, unsigned char **opaqueEncryptedKey)
+    
 {
     //1. Create the structure and encode it (if needed)
     size_t msgLen = 0;
@@ -1209,8 +1273,9 @@ static int _handle_ec_import_private_key_message(const uuid_t correlationId, KEY
     KeyIso_clear_free(msgBuf, msgLen);
 
     //3. Deserialize response (if needed) and return relevant fields
-    *outEncKey = NULL;
-    *outSalt = NULL;
+    *outClientData = NULL;
+    *opaqueEncryptedKey = NULL;
+    *opaqueEncryptedKeyLen = 0;
 
     if (reply && (result == STATUS_OK)) {
         KEYISO_IMPORT_PRIV_KEY_OUT_ST *outSt = NULL;
@@ -1218,7 +1283,7 @@ static int _handle_ec_import_private_key_message(const uuid_t correlationId, KEY
         if (!isEncodingRequired) {
             outSt = (KEYISO_IMPORT_PRIV_KEY_OUT_ST*)reply->outSt;
             if (outSt && (outSt->headerSt.result == STATUS_OK) && KeyIso_is_valid_import_priv_key_out_structure(correlationId, outSt, reply->outLen))
-                result = _copy_encrypted_key_and_salt(correlationId, &outSt->encKeySt, (char*)&outSt->secretSalt, outEncKey, outSalt);
+                result = _copy_data(outSt, opaqueEncryptedKey, opaqueEncryptedKeyLen, outClientData);
             else
                 result = STATUS_FAILED;
         } else {
@@ -1229,7 +1294,7 @@ static int _handle_ec_import_private_key_message(const uuid_t correlationId, KEY
                 if (outSt != NULL) {
                     result = KeyIso_deserialize_import_ec_priv_key_out(reply->outSt, reply->outLen, outSt);
                     if (result == STATUS_OK && outSt->headerSt.result == STATUS_OK)
-                        result = _copy_encrypted_key_and_salt(correlationId, &outSt->encKeySt, (char*)&outSt->secretSalt, outEncKey, outSalt);
+                        result = _copy_data(outSt, opaqueEncryptedKey, opaqueEncryptedKeyLen, outClientData);
                     else
                         result = STATUS_FAILED;
                     KeyIso_clear_free(outSt, sizeToAlloc);
@@ -1252,76 +1317,51 @@ static int _handle_ec_import_private_key_message(const uuid_t correlationId, KEY
 ////////////////////////// 
 
 // RSA functions
-static int _cleanup_copy_rsa_key_generate_values(const uuid_t correlationId, int result, const char *loc, const char *message, char *salt,
-                                                 X509_SIG *encryptedPkeyP8, KEYISO_RSA_PUBLIC_KEY_ST *pPubKeySt, KEYISO_ENCRYPTED_PRIV_KEY_ST *pEncKeySt) 
+static int _copy_rsa_key_generate_values(
+	const uuid_t correlationId,
+    const KEYISO_GEN_RSA_KEY_PAIR_OUT_ST *decodedOutSt,
+    EVP_PKEY **outPubKey,
+    X509_SIG **outEncKey,
+    KEYISO_CLIENT_METADATA_HEADER_ST *outMetaData)
 {
-    if (result != STATUS_OK) {
-        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_GEN_KEY_TITLE, loc, message);
-        KeyIso_clear_free_string(salt);
-        X509_SIG_free(encryptedPkeyP8);
+    if (!decodedOutSt || !outPubKey || !outEncKey || !outMetaData) {
+        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_GEN_KEY_TITLE, "Invalid input", "NULL parameter");
+        return STATUS_FAILED;
     }
-    KeyIso_free(pEncKeySt);
-    KeyIso_free(pPubKeySt);
-    return result;
-}
+    *outPubKey = NULL;
+    *outEncKey = NULL;
 
-#define _CLEANUP_COPY_RSA_KEY_GENERATE(result, loc, message) \
-        _cleanup_copy_rsa_key_generate_values(correlationId, result, loc, message, secretSalt, encryptedPkeyP8, pPubKeySt, pEncKeySt)
+    EVP_PKEY *pkey = NULL;
+    int ret = STATUS_FAILED;
 
-static int _copy_rsa_key_generate_values(const uuid_t correlationId,
-                                         const KEYISO_GEN_RSA_KEY_PAIR_OUT_ST *decodedOutSt,
-                                         EVP_PKEY **outPubKey, X509_SIG **outEncKey, char **outSalt) 
-{
-    KEYISO_ENCRYPTED_PRIV_KEY_ST* pEncKeySt = NULL;
-    KEYISO_RSA_PUBLIC_KEY_ST* pPubKeySt = NULL;
-    X509_SIG* encryptedPkeyP8 = NULL;
-    const char* saltStr = (char*)decodedOutSt->secretSalt;
-    char *secretSalt = NULL;
+    // Get modulus and public exponent from output struct
+    const uint8_t *n = decodedOutSt->data;  // modulus is first
+    const uint8_t *e = n + decodedOutSt->rsaModulusLen; // public exponent follows
 
-    size_t encryptedKeyBytesLen = decodedOutSt->saltLen + decodedOutSt->ivLen + decodedOutSt->hmacLen + decodedOutSt->encKeyLen;
-    size_t pubKeyBytesLen = decodedOutSt->rsaModulusLen + decodedOutSt->rsaPublicExpLen;
-    size_t encKeyLen = GET_DYNAMIC_STRUCT_SIZE(KEYISO_ENCRYPTED_PRIV_KEY_ST, encryptedKeyBytesLen);
-    size_t pubKeyLen = GET_DYNAMIC_STRUCT_SIZE(KEYISO_RSA_PUBLIC_KEY_ST, pubKeyBytesLen);
+    if ((pkey = KeyIso_get_rsa_evp_pub_key(correlationId, n, decodedOutSt->rsaModulusLen, e, decodedOutSt->rsaPublicExpLen)) == NULL) {
+        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_GEN_KEY_TITLE, "Failed to create RSA public key", "Invalid modulus or public exponent");
+        return STATUS_FAILED;
+    }
+   
+    // Update client meta data
+    outMetaData->version = decodedOutSt->headerSt.version;
+    outMetaData->isolationSolution = decodedOutSt->headerSt.isolationSolution;
 
-    pEncKeySt = (KEYISO_ENCRYPTED_PRIV_KEY_ST *) KeyIso_zalloc(encKeyLen);
-    pPubKeySt = (KEYISO_RSA_PUBLIC_KEY_ST *) KeyIso_zalloc(pubKeyLen);
-    secretSalt = (char *) KeyIso_zalloc(KEYISO_SECRET_SALT_STR_BASE64_LEN);
-    if (pEncKeySt == NULL || secretSalt == NULL || pPubKeySt == NULL) {
-        return _CLEANUP_COPY_RSA_KEY_GENERATE(STATUS_FAILED, "KeyIso_zalloc", "Allocation failed");
+    // Copy opaque key data
+    uint32_t opaqueKeyOffset = 0;
+    if (decodedOutSt->opaqueEncryptedKeyLen > 0 && !KEYISO_ADD_OVERFLOW(decodedOutSt->rsaModulusLen, decodedOutSt->rsaPublicExpLen, &opaqueKeyOffset)) {
+        ret = KeyIso_create_pkcs8_enckey(decodedOutSt->opaqueEncryptedKeyLen, (const unsigned char *)decodedOutSt->data + opaqueKeyOffset, outEncKey);
     }
 
-    size_t secretSaltLen = strlen(saltStr);
-    if (secretSaltLen >= KEYISO_SECRET_SALT_STR_BASE64_LEN) {
-        return _CLEANUP_COPY_RSA_KEY_GENERATE(STATUS_FAILED, "secretSalt", "Invalid secret salt length");
-    }
-    memcpy(secretSalt, saltStr, secretSaltLen);
-    secretSalt[KEYISO_SECRET_SALT_STR_BASE64_LEN - 1] = '\0';
-    pEncKeySt->algVersion = decodedOutSt->algVersion;
-    pEncKeySt->saltLen = decodedOutSt->saltLen;
-    pEncKeySt->ivLen = decodedOutSt->ivLen;
-    pEncKeySt->hmacLen = decodedOutSt->hmacLen;
-    pEncKeySt->encKeyLen = decodedOutSt->encKeyLen;
-    
-    memcpy(&pEncKeySt->encryptedKeyBytes, decodedOutSt->generateRsaKeyBytes, encryptedKeyBytesLen);
-    pPubKeySt->rsaModulusLen = decodedOutSt->rsaModulusLen; 
-    pPubKeySt->rsaPublicExpLen = decodedOutSt->rsaPublicExpLen;
-    memcpy(&pPubKeySt->rsaPubKeyBytes, decodedOutSt->generateRsaKeyBytes + encryptedKeyBytesLen, pubKeyBytesLen);
-
-    // KEYISO_ENCRYPTED_PRIV_KEY_ST to X509_SIG
-    if (KeyIso_create_pkcs8_enckey(pEncKeySt, &encryptedPkeyP8) != STATUS_OK) {
-        return _CLEANUP_COPY_RSA_KEY_GENERATE(STATUS_FAILED, "encryptedPkeySt", "Encrypted key creation failed");
+    if (ret != STATUS_OK) {
+        EVP_PKEY_free(pkey);
+        *outPubKey = NULL;
+    } else {
+        // Assign the output public key
+        *outPubKey = pkey;
     }
 
-    EVP_PKEY* pubEpkey = KeyIso_get_rsa_evp_pub_key(correlationId, pPubKeySt);
-    if (!pubEpkey) {
-       return _CLEANUP_COPY_RSA_KEY_GENERATE(STATUS_FAILED, "pubKmppKeySt", "KeyIso_get_rsa_evp_pub_key failed");
-    }
-
-    *outSalt = secretSalt;
-    *outEncKey = encryptedPkeyP8;
-    *outPubKey = pubEpkey; 
-
-    return _CLEANUP_COPY_RSA_KEY_GENERATE(STATUS_OK, NULL, NULL);
+    return ret;
 }
 
 static KEYISO_GEN_RSA_KEY_PAIR_IN_ST* _create_rsa_generate_key_message(const uuid_t correlationId, unsigned int rsaBits, uint8_t keyUsage, size_t *structSize)
@@ -1375,11 +1415,8 @@ bool KeyIso_is_valid_gen_rsa_key_pair_out_structure(const uuid_t correlationId, 
 {    
     // Checking for integer overflow in the out structure dynamic array
     uint32_t dynamicArrayLen = 0;
-    if(!KEYISO_ADD_OVERFLOW(outSt->saltLen, outSt->ivLen, &dynamicArrayLen) &&
-       !KEYISO_ADD_OVERFLOW(dynamicArrayLen, outSt->hmacLen, &dynamicArrayLen) && 
-       !KEYISO_ADD_OVERFLOW(dynamicArrayLen, outSt->encKeyLen, &dynamicArrayLen) && 
-       !KEYISO_ADD_OVERFLOW(dynamicArrayLen, outSt->rsaModulusLen, &dynamicArrayLen) &&
-       !KEYISO_ADD_OVERFLOW(dynamicArrayLen, outSt->rsaPublicExpLen, &dynamicArrayLen)) {
+    if(!KEYISO_ADD_OVERFLOW(outSt->rsaModulusLen, outSt->rsaPublicExpLen, &dynamicArrayLen) &&
+       !KEYISO_ADD_OVERFLOW(dynamicArrayLen, outSt->opaqueEncryptedKeyLen, &dynamicArrayLen)) {
 
         // Calculating the size of the out structure, where the dynamic array is already calculated in the above step
         size_t outStLenCalculation = GET_DYNAMIC_STRUCT_SIZE(KEYISO_GEN_RSA_KEY_PAIR_OUT_ST, dynamicArrayLen);
@@ -1397,7 +1434,7 @@ bool KeyIso_is_valid_gen_rsa_key_pair_out_structure(const uuid_t correlationId, 
 }
 
 static int _handle_rsa_generate_key_pair_message(const uuid_t correlationId,unsigned int rsaBits, uint8_t keyUsage, 
-                                                EVP_PKEY** outPubKey,  X509_SIG** outEncryptedPkey, char** outSalt)
+                                                EVP_PKEY** outPubKey, X509_SIG** outEncryptedPkey, KEYISO_CLIENT_METADATA_HEADER_ST *outMetaData)
 {
     //1. Create the structure and encode it (if needed)
     size_t msgLen = 0;
@@ -1411,7 +1448,6 @@ static int _handle_rsa_generate_key_pair_message(const uuid_t correlationId,unsi
     //3. Deserialize response (if needed) and return relevant fields
     *outPubKey = NULL;
     *outEncryptedPkey = NULL;
-    *outSalt = NULL;
 
     if (reply && (result == STATUS_OK)) {
         KEYISO_GEN_RSA_KEY_PAIR_OUT_ST *outSt = NULL;
@@ -1419,7 +1455,7 @@ static int _handle_rsa_generate_key_pair_message(const uuid_t correlationId,unsi
         if (!isEncodingRequired) {
             outSt = (KEYISO_GEN_RSA_KEY_PAIR_OUT_ST*)reply->outSt;
             if (outSt && outSt->headerSt.result == STATUS_OK && KeyIso_is_valid_gen_rsa_key_pair_out_structure(correlationId, outSt, reply->outLen))
-                result = _copy_rsa_key_generate_values(correlationId, outSt, outPubKey, outEncryptedPkey, outSalt);
+                result = _copy_rsa_key_generate_values(correlationId, outSt, outPubKey, outEncryptedPkey, outMetaData);
             else
                 result = STATUS_FAILED;
         } else {
@@ -1430,7 +1466,7 @@ static int _handle_rsa_generate_key_pair_message(const uuid_t correlationId,unsi
                 if (outSt != NULL) {
                     result = KeyIso_deserialize_gen_rsa_key_pair_out(reply->outSt, reply->outLen, outSt);
                     if (result == STATUS_OK && outSt->headerSt.result == STATUS_OK)
-                        result = _copy_rsa_key_generate_values(correlationId, outSt, outPubKey, outEncryptedPkey, outSalt);
+                        result = _copy_rsa_key_generate_values(correlationId, outSt, outPubKey, outEncryptedPkey, outMetaData);
                     else
                         result = STATUS_FAILED;
                     KeyIso_free(outSt);
@@ -1447,78 +1483,75 @@ static int _handle_rsa_generate_key_pair_message(const uuid_t correlationId,unsi
     return result;
 }
 
-static int _cleanup_copy_ec_key_generate_values(const uuid_t correlationId, int result,
-                                                const char* message, const char* loc,
-                                                KEYISO_ENCRYPTED_PRIV_KEY_ST* encKey,
-                                                char* salt, 
-                                                X509_SIG* encKeyP8)
-{
-    if (result != STATUS_OK) {
-        KEYISOP_trace_log_error(NULL, 0, KEYISOP_GEN_KEY_TITLE, message, loc); 
-        KeyIso_clear_free_string(salt);
-        X509_SIG_free(encKeyP8);
-    }
-    KeyIso_free(encKey);
-    return result;
-}
+// static int _cleanup_copy_ec_key_generate_values(const uuid_t correlationId, int result,
+//                                                 const char* message, const char* loc,
+//                                                 KEYISO_ENCRYPTED_PRIV_KEY_ST* encKey,
+//                                                 char* salt, 
+//                                                 X509_SIG* encKeyP8)
+// {
+//     if (result != STATUS_OK) {
+//         KEYISOP_trace_log_error(NULL, 0, KEYISOP_GEN_KEY_TITLE, message, loc); 
+//         KeyIso_clear_free_string(salt);
+//         X509_SIG_free(encKeyP8);
+//     }
+//     KeyIso_free(encKey);
+//     return result;
+// }
 
-#define _CLEANUP_COPY_EC_KEY_GENERATE_VALUES(result, message, loc) \
-    _cleanup_copy_ec_key_generate_values(correlationId, result, message, loc, pEncKeySt, secretSalt, encKeyP8)
+/* #define _CLEANUP_COPY_EC_KEY_GENERATE_VALUES(result, message, loc) \
+     _cleanup_copy_ec_key_generate_values(correlationId, result, message, loc, pEncKeySt, secretSalt, encKeyP8)*/
 
 // EC functions
-static int _copy_ec_key_generate_values(const uuid_t correlationId,
-                                        const KEYISO_GEN_EC_KEY_PAIR_OUT_ST* outSt,
-                                        EC_GROUP** outEcGroup,
-                                        EC_KEY** outEcPubKey,
-                                        X509_SIG** outEncKeyP8,
-                                        char** outSalt) 
+static int _copy_ec_key_generate_values(
+    const uuid_t correlationId,
+    const KEYISO_GEN_EC_KEY_PAIR_OUT_ST *outSt,
+    EC_GROUP **outEcGroup,
+    EC_KEY **outEcPubKey,
+    X509_SIG **outEncKeyP8,
+    KEYISO_CLIENT_METADATA_HEADER_ST *outMetaData)
 {
-    const char* saltStr = (char*)outSt->secretSalt;
-    char* secretSalt = NULL;
-    KEYISO_ENCRYPTED_PRIV_KEY_ST* pEncKeySt = NULL;
-    X509_SIG* encKeyP8 = NULL;
-    EC_KEY* ecKey = NULL;
-    EC_GROUP* ecGroup = NULL;
+    int ret = STATUS_FAILED;
+    EC_KEY *ecKey = NULL;
+    EC_GROUP *ecGroup = NULL;
 
-    size_t encryptedKeyBytesLen = outSt->saltLen + outSt->ivLen + outSt->hmacLen + outSt->encKeyLen;
-    size_t encKeyLen = GET_DYNAMIC_STRUCT_SIZE(KEYISO_ENCRYPTED_PRIV_KEY_ST, encryptedKeyBytesLen);
-
-    pEncKeySt = (KEYISO_ENCRYPTED_PRIV_KEY_ST *) KeyIso_zalloc(encKeyLen);
-    secretSalt = (char *) KeyIso_zalloc(KEYISO_SECRET_SALT_STR_BASE64_LEN);
-    if (pEncKeySt == NULL || secretSalt == NULL) {
-        return _CLEANUP_COPY_EC_KEY_GENERATE_VALUES(STATUS_FAILED, "encrypted key struct", "KeyIso_zalloc failed");
+    // Validate input
+    if (!outSt || !outEcGroup || !outEcPubKey || !outEncKeyP8 || !outMetaData) {
+        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_GEN_KEY_TITLE, "Invalid input", "NULL parameter");
+        return STATUS_FAILED;
     }
+    *outEcGroup = NULL;
+    *outEcPubKey = NULL;
+    *outEncKeyP8 = NULL;
 
-    size_t secretSaltLen = strlen(saltStr);
-    if (secretSaltLen >= KEYISO_SECRET_SALT_STR_BASE64_LEN) {
-        KEYISOP_trace_log_error_para(correlationId, 0, KEYISOP_GEN_KEY_TITLE, "secretSalt", "Invalid secret salt length", "secretSaltLen:%lu, max len:%lu", secretSaltLen, KEYISO_SECRET_SALT_STR_BASE64_LEN);
-        return _CLEANUP_COPY_EC_KEY_GENERATE_VALUES(STATUS_FAILED, "Invalid secret salt length", "secretSalt");
-    }
-    memcpy(secretSalt, saltStr, secretSaltLen);
-    secretSalt[KEYISO_SECRET_SALT_STR_BASE64_LEN - 1] = '\0';
-    pEncKeySt->algVersion = outSt->algVersion;
-    pEncKeySt->saltLen = outSt->saltLen;
-    pEncKeySt->ivLen = outSt->ivLen;
-    pEncKeySt->hmacLen = outSt->hmacLen;
-    pEncKeySt->encKeyLen = outSt->encKeyLen;
-    memcpy(&pEncKeySt->encryptedKeyBytes, outSt->generateEcKeyBytes, encryptedKeyBytesLen);
+    // CB-CHANGES: Replace deprecated EC key handling in KeyIso_get_ec_evp_key by constructing EVP_PKEY directly from EC public key components.
+    // Use KeyIso_create_ec_evp_pub_key instead, which is already implemented but currently disabled.
 
-    // KEYISO_ENCRYPTED_PRIV_KEY_ST to X509_SIG
-    if (KeyIso_create_pkcs8_enckey(pEncKeySt, &encKeyP8) != STATUS_OK) {
-        return _CLEANUP_COPY_EC_KEY_GENERATE_VALUES(STATUS_FAILED, "KeyIso_create_pkcs8_enckey failed", "unable to create p8 from enckey");
+    // Getting outEcGroup and outEcPubKey using KeyIso_get_ec_evp_pub_key 
+    if (KeyIso_get_ec_evp_key(correlationId, outSt->ecCurve, outSt->ecPubKeyLen, outSt->data, 0, NULL, &ecKey, &ecGroup) != STATUS_OK) {
+        return STATUS_FAILED;
     }
-    
-    const unsigned char *pubKeyBytes = outSt->generateEcKeyBytes + encryptedKeyBytesLen;
-    uint32_t  len =  outSt->ecPubKeyLen/2;
-    if (KeyIso_get_ec_evp_pub_key(correlationId, outSt->ecCurve, pubKeyBytes , len, (pubKeyBytes + len), len, &ecKey, &ecGroup) != STATUS_OK) {
-        return _CLEANUP_COPY_EC_KEY_GENERATE_VALUES(STATUS_FAILED, "KeyIso_get_ec_evp_pub_key failed", "unable to get ossl ec public key from data");
-    }
-
-    *outSalt = secretSalt;
-    *outEncKeyP8 = encKeyP8;
     *outEcGroup = ecGroup;
-    *outEcPubKey = ecKey; 
-    return _CLEANUP_COPY_EC_KEY_GENERATE_VALUES(STATUS_OK, NULL, NULL);
+    *outEcPubKey = ecKey;
+
+    // Update client meta data
+    outMetaData->version = outSt->headerSt.version;
+    outMetaData->isolationSolution = outSt->headerSt.isolationSolution;
+
+    // Copy opaque key data
+    uint32_t opaqueKeyOffset = outSt->ecPubKeyLen;
+    if (outSt->opaqueEncryptedKeyLen > 0) {
+        ret = KeyIso_create_pkcs8_enckey(outSt->opaqueEncryptedKeyLen, (const unsigned char *)outSt->data + opaqueKeyOffset, outEncKeyP8);
+    }
+
+    if (ret != STATUS_OK) {
+        // free allocated resources ?
+        EC_KEY_free(*outEcPubKey);
+        *outEcGroup = NULL;
+        *outEcPubKey = NULL;
+        *outEncKeyP8 = NULL;
+    }
+
+    return ret;
 }
 
 static KEYISO_GEN_EC_KEY_PAIR_IN_ST* _create_ec_generate_key_message(const uuid_t correlationId, unsigned int curve, uint8_t keyUsage, size_t *structSize)
@@ -1573,10 +1606,7 @@ bool KeyIso_is_valid_gen_ec_key_pair_out_structure(const uuid_t correlationId, c
 {    
     // Checking for integer overflow in the out structure dynamic array
     uint32_t dynamicArrayLen = 0;
-    if(!KEYISO_ADD_OVERFLOW(outSt->saltLen, outSt->ivLen, &dynamicArrayLen) &&
-       !KEYISO_ADD_OVERFLOW(dynamicArrayLen, outSt->hmacLen, &dynamicArrayLen) && 
-       !KEYISO_ADD_OVERFLOW(dynamicArrayLen, outSt->encKeyLen, &dynamicArrayLen) && 
-       !KEYISO_ADD_OVERFLOW(dynamicArrayLen, outSt->ecPubKeyLen, &dynamicArrayLen)) {
+    if(!KEYISO_ADD_OVERFLOW(outSt->ecPubKeyLen, outSt->opaqueEncryptedKeyLen, &dynamicArrayLen)) {
         
         // Calculating the size of the out structure, where the dynamic array is already calculated in the above step
         size_t outStLenCalculation = GET_DYNAMIC_STRUCT_SIZE(KEYISO_GEN_EC_KEY_PAIR_OUT_ST, dynamicArrayLen);
@@ -1593,13 +1623,14 @@ bool KeyIso_is_valid_gen_ec_key_pair_out_structure(const uuid_t correlationId, c
     return true;
 }
 
-static int _handle_ec_generate_key_pair_message(const uuid_t correlationId,
-                                                unsigned int curve,
-                                                uint8_t keyUsage, 
-                                                EC_GROUP** outEcGroup,
-                                                EC_KEY** outPubKey,
-                                                X509_SIG** outEncryptedPkeyP8,
-                                                char** outSalt)
+static int _handle_ec_generate_key_pair_message(
+    const uuid_t correlationId,
+    unsigned int curve,
+    uint8_t keyUsage, 
+    EC_GROUP** outEcGroup,
+    EC_KEY** outPubKey,
+    X509_SIG** outEncryptedPkeyP8,
+    KEYISO_CLIENT_METADATA_HEADER_ST *outMetaData)
 {
     //1. Create the structure and encode it (if needed)
     size_t msgLen = 0;
@@ -1613,15 +1644,14 @@ static int _handle_ec_generate_key_pair_message(const uuid_t correlationId,
     //3. Deserialize response (if needed) and return relevant fields
     *outPubKey = NULL;
     *outEncryptedPkeyP8 = NULL;
-    *outSalt = NULL;
 
     if (reply && (result == STATUS_OK)) {
         KEYISO_GEN_EC_KEY_PAIR_OUT_ST* outSt = NULL;
         bool isEncodingRequired = KeyIso_client_adapter_is_encoding();
         if (!isEncodingRequired) {
             outSt = (KEYISO_GEN_EC_KEY_PAIR_OUT_ST*)reply->outSt;
-            if (outSt && outSt->headerSt.result == STATUS_OK && KeyIso_is_valid_gen_ec_key_pair_out_structure(correlationId, outSt, reply->outLen)) {  
-                result = _copy_ec_key_generate_values(correlationId, outSt, outEcGroup, outPubKey, outEncryptedPkeyP8, outSalt);                
+            if (outSt && outSt->headerSt.result == STATUS_OK && KeyIso_is_valid_gen_ec_key_pair_out_structure(correlationId, outSt, reply->outLen)) {
+                result = _copy_ec_key_generate_values(correlationId, outSt, outEcGroup, outPubKey, outEncryptedPkeyP8, outMetaData);                
             }                
             else
                 result = STATUS_FAILED;
@@ -1633,7 +1663,7 @@ static int _handle_ec_generate_key_pair_message(const uuid_t correlationId,
                 if (outSt != NULL) {
                     result = KeyIso_deserialize_gen_ec_key_pair_out(reply->outSt, reply->outLen, outSt);
                     if (result == STATUS_OK && outSt->headerSt.result == STATUS_OK)
-                        result = _copy_ec_key_generate_values(correlationId, outSt, outEcGroup, outPubKey, outEncryptedPkeyP8, outSalt);
+                        result = _copy_ec_key_generate_values(correlationId, outSt, outEcGroup, outPubKey, outEncryptedPkeyP8, outMetaData);
                     else
                         result = STATUS_FAILED;
                     KeyIso_free(outSt);
@@ -1653,91 +1683,134 @@ static int _handle_ec_generate_key_pair_message(const uuid_t correlationId,
 //////////////////////////
 /*     Open key         */
 //////////////////////////
-static KEYISO_OPEN_PRIV_KEY_IN_ST* _create_open_priv_key_message(KEYISO_ENCRYPTED_PRIV_KEY_ST* encKeySt, const KEYISO_KEY_CTX *keyCtx, size_t *structSize)
-{
-    KEYISO_KEY_DETAILS* keyDetails = NULL;
-    if (!encKeySt || !structSize || !keyCtx)
-        return NULL;
-    
-    keyDetails = (KEYISO_KEY_DETAILS*)keyCtx->keyDetails;
-    if (!keyDetails || !keyDetails->salt)
-        return NULL;
-    
-    const char* salt = keyDetails->salt;
-    size_t dynamicLen = KeyIso_get_enc_key_bytes_len(keyCtx->correlationId, encKeySt->saltLen, encKeySt->ivLen, encKeySt->hmacLen, encKeySt->encKeyLen);
 
-    *structSize = GET_DYNAMIC_STRUCT_SIZE(KEYISO_OPEN_PRIV_KEY_IN_ST, dynamicLen);
-    
-    KEYISO_OPEN_PRIV_KEY_IN_ST* inSt = (KEYISO_OPEN_PRIV_KEY_IN_ST*)KeyIso_zalloc(*structSize);
-    if (inSt == NULL) {
-        *structSize = 0;        
-        return NULL;
-    }
-
-    _fill_header(&inSt->headerSt, IpcCommand_OpenPrivateKey, keyCtx->correlationId);
-
-    size_t secretSaltLen = strlen(salt);
-    if (secretSaltLen >= KEYISO_SECRET_SALT_STR_BASE64_LEN) {
-        KEYISOP_trace_log_error(0, 0, KEYISOP_OPEN_KEY_TITLE, "secretSalt", "Invalid secret salt length");        
-        return NULL;
-    }
-
-    memcpy(inSt->secretSalt, salt, secretSaltLen);
-    inSt->secretSalt[KEYISO_SECRET_SALT_STR_BASE64_LEN - 1] = '\0';
-    inSt->encKeySt.algVersion = encKeySt->algVersion;
-    inSt->encKeySt.saltLen = encKeySt->saltLen;
-    inSt->encKeySt.ivLen = encKeySt->ivLen;
-    inSt->encKeySt.hmacLen = encKeySt->hmacLen;
-    inSt->encKeySt.encKeyLen = encKeySt->encKeyLen;
-    memcpy(inSt->encKeySt.encryptedKeyBytes, encKeySt->encryptedKeyBytes, dynamicLen);
-
-    return inSt;
-}
-
-static uint8_t* _cleanup_open_private_key(int ret, const char *loc, const char *err, uint8_t *msgBuf, 
-    KEYISO_ENCRYPTED_PRIV_KEY_ST *encKeySt, KEYISO_OPEN_PRIV_KEY_IN_ST* inSt)
+static KEYISO_OPEN_PRIV_KEY_IN_ST* _cleanup_open_priv_key_message(
+    int ret,
+    const char *loc,
+    const char *err,
+    const uuid_t correlationId,
+    KEYISO_OPEN_PRIV_KEY_IN_ST* inSt,
+    unsigned char* opaqueEncKey,
+    uint32_t opaqueEncKeyLen)
 {
     if (ret != STATUS_OK) {
-        KEYISOP_trace_log_error(0, 0, KEYISOP_OPEN_KEY_TITLE, loc, err);
+        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_OPEN_KEY_TITLE, loc, err);
+        KeyIso_free(inSt);
     }
 
-    KeyIso_free(encKeySt);
+    KeyIso_free(opaqueEncKey);
+    return inSt;
+}
+ 
+#define _CLEANUP_OPEN_PRIV_KEY(ret, loc, err) \
+    _cleanup_open_priv_key_message(ret, loc, err, keyCtx->correlationId, inSt, opaqueEncKey, opaqueEncKeyLen)
+ 
+static KEYISO_OPEN_PRIV_KEY_IN_ST* _create_open_priv_key_message(
+    const KEYISO_KEY_CTX *keyCtx,
+    size_t *structSize)
+{
+    if (!keyCtx || !structSize) {
+        return NULL;
+    }
+ 
+    unsigned char* opaqueEncKey = NULL;
+    uint32_t opaqueEncKeyLen = 0;
+    KEYISO_OPEN_PRIV_KEY_IN_ST* inSt = NULL;
+   
+    int result = _get_opaque_key_from_key_ctx(keyCtx, &opaqueEncKey, &opaqueEncKeyLen);
+    if (result != STATUS_OK) {
+        return _CLEANUP_OPEN_PRIV_KEY(result, "_get_opaque_key_from_key_ctx", "Failed to get encrypted key from key bytes");
+    }
+   
+    KEYISO_KEY_DETAILS* keyDetails = (KEYISO_KEY_DETAILS*)keyCtx->keyDetails;
+    if (!keyDetails) {
+        return _CLEANUP_OPEN_PRIV_KEY(STATUS_FAILED, "keyDetails", "Invalid key details");
+    }
+ 
+    KEYISO_CLIENT_DATA_ST* clientData = (KEYISO_CLIENT_DATA_ST *)keyDetails->clientData;
+    if (!clientData) {
+        return _CLEANUP_OPEN_PRIV_KEY(STATUS_FAILED, "clientData", "Invalid client data");
+    }
+ 
+    uint32_t dynamicLen = clientData->pubKeyLen + opaqueEncKeyLen;
+    *structSize = GET_DYNAMIC_STRUCT_SIZE(KEYISO_OPEN_PRIV_KEY_IN_ST, dynamicLen);
+   
+    inSt = (KEYISO_OPEN_PRIV_KEY_IN_ST*)KeyIso_zalloc(*structSize);
+    if (inSt == NULL) {
+        *structSize = 0;
+        return _CLEANUP_OPEN_PRIV_KEY(STATUS_FAILED, "KeyIso_zalloc", "Failed to allocate memory for open private key message");
+    }
+ 
+    // Fill the headers
+    _fill_header(&inSt->headerSt, IpcCommand_OpenPrivateKey, keyCtx->correlationId);
+    _fill_client_data(&inSt->clientDataHeader, clientData);
+ 
+    // Fill the key data
+    inSt->publicKeyLen = clientData->pubKeyLen;
+    inSt->opaqueEncryptedKeyLen = opaqueEncKeyLen;
+ 
+    // Copy the key data
+    if (clientData->pubKeyLen > 0) {
+        memcpy(inSt->data, clientData->pubKeyBytes, clientData->pubKeyLen);
+    }
+    if (opaqueEncKeyLen > 0) {
+        memcpy(inSt->data + clientData->pubKeyLen, opaqueEncKey, opaqueEncKeyLen);
+    }
+ 
+    KeyIso_free(opaqueEncKey);
+    return inSt;
+}
+ 
+static uint8_t* _cleanup_open_priv_key_serialized_message(
+    int ret,
+    const char *loc,
+    const char *err,
+    const uuid_t correlationId,
+    uint8_t *msgBuf,
+    KEYISO_OPEN_PRIV_KEY_IN_ST *inSt)
+{
+    if (ret != STATUS_OK) {
+        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_OPEN_KEY_TITLE, loc, err);
+    }
     KeyIso_free(inSt);
     return msgBuf;
 }
+ 
+#define _CLEANUP_OPEN_PRIV_KEY_SERIALIZED(ret, loc, err) \
+    _cleanup_open_priv_key_serialized_message(ret, loc, err, keyCtx->correlationId, msgBuf, inSt)
+ 
 static uint8_t* _create_and_serialize_open_priv_key_message(const KEYISO_KEY_CTX *keyCtx, size_t *msgLen)
-{ 	    
-    if (!msgLen)
+{      
+    if (!msgLen || !keyCtx) {
         return NULL;
-    
+    }
+   
     *msgLen = 0;
-
-    // 1. parse keyiso_encrypted_private_key_st from keyBytes
-    KEYISO_ENCRYPTED_PRIV_KEY_ST* encKeySt = NULL;
-    int result = _get_encrypted_key_from_key_bytes(keyCtx, &encKeySt);
-    if (result != STATUS_OK) {
-        return _cleanup_open_private_key(result, "_get_encrypted_key_from_key_bytes", "Getting encrypted key failed", NULL, encKeySt, NULL);
-    }     
-
-    //2. Create struct
+   
+    // Create the structure using our helper function
     size_t structSize = 0;
-    KEYISO_OPEN_PRIV_KEY_IN_ST* inSt = _create_open_priv_key_message(encKeySt, keyCtx, &structSize);
+    KEYISO_OPEN_PRIV_KEY_IN_ST *inSt = _create_open_priv_key_message(keyCtx, &structSize);
     if (inSt == NULL) {
-        _cleanup_open_private_key(STATUS_FAILED, "_create_open_priv_key_message", "Creating open private key message failed", NULL, encKeySt, inSt);
+        // Memory allocation failed
         return NULL;
-    }        
-    
-    //3. Check if encoding is required by the IPC
-    bool isEncodingRequired = KeyIso_client_adapter_is_encoding(); 
+    }
+   
+    // Check if encoding is required by the IPC
+    uint8_t *msgBuf = NULL;
+    bool isEncodingRequired = KeyIso_client_adapter_is_encoding();
     if (!isEncodingRequired) {
-        KeyIso_free(encKeySt);
         *msgLen = structSize;
-        return (uint8_t*) inSt;
+        return (uint8_t*)inSt;
     }    
-
-    //4. Encode struct
-    uint8_t *msgBuf = KeyIso_serialize_open_priv_key_in(inSt, msgLen);	
-    return _cleanup_open_private_key(STATUS_OK, "", "", msgBuf, encKeySt, inSt);
+ 
+    // Encode struct
+    msgBuf = KeyIso_serialize_open_priv_key_in(inSt, msgLen);
+    if (msgBuf == NULL) {
+        return _CLEANUP_OPEN_PRIV_KEY_SERIALIZED(STATUS_FAILED, "KeyIso_serialize_open_priv_key_in failed", "Failed to serialize open private key message");
+    }
+   
+    KeyIso_free(inSt);
+    return msgBuf;
 }
 
 static size_t _get_len_open_priv_key_out(const uint8_t *encodedSt, size_t encodedLen)
@@ -1881,7 +1954,40 @@ static uint8_t* _create_and_serialize_import_symmetric_key_message(const uuid_t 
     return outBuf;
 }
 
-int _get_import_symmetric_key_result(const KEYISO_IMPORT_SYMMETRIC_KEY_OUT_ST *outSt, unsigned int *outKeyLength, unsigned char **outKeyBytes)
+static int _create_base64_client_keyid_metadata(const uuid_t correlationId, KmppKeyIdType  keyType, uint8_t clientVersion, uint8_t serviceVersion, uint32_t isolationSolution, char **outClientData)
+{
+    if (!outClientData) {
+        return STATUS_FAILED;
+    }
+    KEYISO_CLIENT_KEYID_HEADER_ST clientKeyIdMetadataSt =  {
+        .clientVersion = clientVersion,
+        .keyType = keyType,
+        .keyServiceVersion = serviceVersion,
+        .isolationSolution = isolationSolution
+    };
+
+    *outClientData = NULL;
+    unsigned char* clientKeyIdBuff = (unsigned char *)KeyIso_zalloc(sizeof(clientKeyIdMetadataSt));
+    if (clientKeyIdBuff == NULL) {
+        return STATUS_FAILED;
+    }
+    
+    memcpy(clientKeyIdBuff, &clientKeyIdMetadataSt, sizeof(KEYISO_CLIENT_KEYID_HEADER_ST));
+
+    char *clientDataBase64 = NULL;
+    int len = KeyIso_base64_encode(correlationId, clientKeyIdBuff, sizeof(clientKeyIdMetadataSt), &clientDataBase64);
+    if (len <= 0 || clientDataBase64 == NULL) {
+        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_IMPORT_KEY_TITLE, "KeyIso_base64_encode failed", "Failed to encode client header");
+        KeyIso_free(clientKeyIdBuff);
+        return STATUS_FAILED;
+    }
+
+    *outClientData = clientDataBase64;
+    KeyIso_free(clientKeyIdBuff);
+    return STATUS_OK;
+}
+
+int _get_import_symmetric_key_result(const unsigned char *correlationId, const KEYISO_IMPORT_SYMMETRIC_KEY_OUT_ST *outSt, unsigned int *outKeyLength, unsigned char **outKeyBytes, char **outClientData)
 {
     if ((outSt->headerSt.result == STATUS_OK) && (outSt->encryptedKeyLen > 0)) {
         *outKeyBytes = (unsigned char *)KeyIso_zalloc(outSt->encryptedKeyLen);
@@ -1890,6 +1996,22 @@ int _get_import_symmetric_key_result(const KEYISO_IMPORT_SYMMETRIC_KEY_OUT_ST *o
             *outKeyLength = outSt->encryptedKeyLen; 
         }
     }
+    uint8_t clientVersion = KEYISOP_CURRENT_VERSION; // The version of the client that formats the keyid
+    KmppKeyIdType keyType = KmppKeyIdType_symmetric; // The type of the key that is being imported
+    uint8_t serviceVersion = outSt->headerSt.version;
+    uint16_t isolationSolution = outSt->headerSt.isolationSolution;
+    if (serviceVersion == KEYISOP_INVALID_VERSION && isolationSolution == KeyIsoSolutionType_invalid ) { 
+        // Previous Version Service 
+        serviceVersion = KEYISOP_VERSION_3;
+        // There is no other isolation solution for version 3, so we set PB
+        isolationSolution = KeyIsoSolutionType_process;
+    }
+
+    int result = _create_base64_client_keyid_metadata(correlationId, keyType, clientVersion, serviceVersion, isolationSolution, outClientData);
+    if (result != STATUS_OK) {
+        return result;
+    }
+
     return outSt->headerSt.result;
 }
 
@@ -1908,7 +2030,7 @@ bool KeyIso_is_valid_import_symmetric_key_out_structure(const uuid_t correlation
 }
 
 int _handle_import_symmetric_message(const uuid_t correlationId, int inSymmetricKeyType, int inKeyLength, 
-                    const unsigned char *inKeyBytes, const unsigned char *inImportKeyId, unsigned int *outKeyLength, unsigned char **outKeyBytes)
+                    const unsigned char *inKeyBytes, const unsigned char *inImportKeyId, unsigned int *outKeyLength, unsigned char **outKeyBytes, char **outClientData)
 {
     *outKeyLength = 0;
     *outKeyBytes = NULL;
@@ -1929,7 +2051,7 @@ int _handle_import_symmetric_message(const uuid_t correlationId, int inSymmetric
         if (!isEncodingRequired) {
             outSt = (KEYISO_IMPORT_SYMMETRIC_KEY_OUT_ST*)reply->outSt;
             if (outSt && outSt->headerSt.result == STATUS_OK && KeyIso_is_valid_import_symmetric_key_out_structure(correlationId, outSt, reply->outLen)) {
-                result = _get_import_symmetric_key_result(outSt, outKeyLength, outKeyBytes);
+                result = _get_import_symmetric_key_result(correlationId, outSt, outKeyLength, outKeyBytes, outClientData);
             } else {
                 result = STATUS_FAILED;
             }
@@ -1941,7 +2063,7 @@ int _handle_import_symmetric_message(const uuid_t correlationId, int inSymmetric
                 if (outSt != NULL) {
                     result = KeyIso_deserialize_import_symmetric_key_out(reply->outSt, reply->outLen, outSt);
                     if (result == STATUS_OK) {
-                        result = _get_import_symmetric_key_result(outSt, outKeyLength, outKeyBytes);
+                        result = _get_import_symmetric_key_result(correlationId, outSt, outKeyLength, outKeyBytes, outClientData);
                     }
                     KeyIso_free(outSt);
                 } else {
@@ -1992,7 +2114,7 @@ static KEYISO_SYMMETRIC_ENCRYPT_DECRYPT_IN_ST* _create_symmetric_key_encrypt_dec
     inSt->fromBytesLen = fromLen; 
 
     int index = 0;
-    memcpy(&inSt->encDecBytes[index], keyDetails->keyBytes, inSt->encryptedKeyLen);
+    memcpy(&inSt->encDecBytes[index], keyDetails->keyBytes, keyDetails->keyLength);
     index += inSt->encryptedKeyLen;
     memcpy(&inSt->encDecBytes[index], from, inSt->fromBytesLen);
 
@@ -2113,17 +2235,16 @@ int _handle_symmetric_key_encrypt_decrypt_message(KEYISO_KEY_CTX *keyCtx, int mo
 /*  External functions  */
 //////////////////////////
 
-int KeyIso_client_msg_handler_init_key(KEYISO_KEY_CTX *keyCtx, int keyLength, const unsigned char *keyBytes, const char *salt)
+int KeyIso_client_msg_handler_init_key(KEYISO_KEY_CTX *keyCtx, int keyLength, const unsigned char *keyBytes, const char *clientData)
 {
-    return KeyIso_client_adapter_init_keyCtx(keyCtx, keyLength, keyBytes, salt);
+    return KeyIso_client_adapter_init_keyCtx(keyCtx, keyLength, keyBytes, clientData);
 }
 
 void KeyIso_client_msg_handler_free_keyCtx(KEYISO_KEY_CTX *keyCtx)
 {
-    KEYISOP_trace_log(keyCtx->correlationId, 0, KEYISOP_GDBUS_CLIENT_TITLE, "KeyIso_client_adapter_free_keyCtx");
+    KEYISOP_trace_log(keyCtx->correlationId, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_GDBUS_CLIENT_TITLE, "KeyIso_client_adapter_free_keyCtx");
     KeyIso_client_adapter_free_keyCtx(keyCtx);
 }
-
 
 void KeyIso_client_msg_close_key(KEYISO_KEY_CTX *keyCtx)
 {
@@ -2156,8 +2277,8 @@ int KeyIso_client_msg_ecdsa_sign(KEYISO_KEY_CTX *keyCtx,
     return _handle_ecdsa_sign_message(keyCtx, type, dgst, dlen, sig, sigLen, outLen);
 }
 
-int KeyIso_client_msg_rsa_private_encrypt_decrypt(KEYISO_KEY_CTX *keyCtx,
-                int decrypt, int flen, const unsigned char *from, int tlen, unsigned char *to, int padding)
+int KeyIso_client_msg_rsa_private_encrypt_decrypt(KEYISO_KEY_CTX *keyCtx, int decrypt, int flen, 
+    const unsigned char *from, int tlen, unsigned char *to, int padding, int labelLen)
 {
     const char *title = _get_rsa_enc_dec_title(decrypt);
     if (keyCtx == NULL) {
@@ -2174,13 +2295,13 @@ int KeyIso_client_msg_rsa_private_encrypt_decrypt(KEYISO_KEY_CTX *keyCtx,
         }
     }
     
-    return _handle_rsa_private_encrypt_decrypt_message(keyCtx, decrypt, flen, from, tlen, to, padding);
+    return _handle_rsa_private_encrypt_decrypt_message(keyCtx, decrypt, flen, from, tlen, to, padding, labelLen);
 }
 
 int KeyIso_client_msg_import_symmetric_key(const uuid_t correlationId, int inSymmetricKeyType, unsigned int inKeyLength, 
-                const unsigned char *inKeyBytes, const unsigned char *inImportKeyId, unsigned int *outKeyLength, unsigned char **outKeyBytes)
+                const unsigned char *inKeyBytes, const unsigned char *inImportKeyId, unsigned int *outKeyLength, unsigned char **outKeyBytes, char **outClientData)
 {
-    return _handle_import_symmetric_message(correlationId, inSymmetricKeyType, inKeyLength, inKeyBytes, inImportKeyId, outKeyLength, outKeyBytes);
+    return _handle_import_symmetric_message(correlationId, inSymmetricKeyType, inKeyLength, inKeyBytes, inImportKeyId, outKeyLength, outKeyBytes, outClientData);
 }
 
 int KeyIso_client_msg_symmetric_key_encrypt_decrypt(KEYISO_KEY_CTX *keyCtx, int mode, 
@@ -2202,65 +2323,64 @@ int KeyIso_client_msg_symmetric_key_encrypt_decrypt(KEYISO_KEY_CTX *keyCtx, int 
     return _handle_symmetric_key_encrypt_decrypt_message(keyCtx, mode, from, fromLen, to, toLen);
 }
 
-static int _cleanup_client_msg_import_private_key(const uuid_t correlationId, int ret , const char* message, KEYISO_ENCRYPTED_PRIV_KEY_ST* encKeySt, X509_SIG* encKey, char* salt)
+static int _cleanup_client_msg_import_private_key(const uuid_t correlationId, int ret , const char* message, unsigned char *opaqueKey, KEYISO_CLIENT_DATA_ST *clientData)
 {
     if (ret != STATUS_OK) {
         KEYISOP_trace_log_error(correlationId, 0, KEYISOP_IMPORT_KEY_TITLE, "Import private key failed", message);
-        X509_SIG_free(encKey);
-        encKey = NULL;
-        KeyIso_clear_free_string(salt);
+        KeyIso_free(clientData);
     }
-    KeyIso_free(encKeySt);
+    KeyIso_free(opaqueKey);
     return ret;
 }
 
 #define _CLEANUP_IMPORT_PRIVATE_KEY(ret, message) \
-     _cleanup_client_msg_import_private_key(correlationId, ret, message, encKeySt, encKey, salt)
+     _cleanup_client_msg_import_private_key(correlationId, ret, message, opaqueKey, clientData)
 
 int KeyIso_client_msg_import_private_key(const uuid_t correlationId, int keyType,
-    const unsigned char *inKeyBytes,  X509_SIG **outEncKey, char **outSalt) {
+    const unsigned char *inKeyBytes, X509_SIG **outEncKey, KEYISO_CLIENT_DATA_ST **outClientData) {
 
     int ret = STATUS_FAILED; 
-    KEYISO_ENCRYPTED_PRIV_KEY_ST* encKeySt = NULL;
+    KEYISO_CLIENT_DATA_ST *clientData = NULL;
     X509_SIG* encKey = NULL;
-    char* salt = NULL;
-
-    if (inKeyBytes == NULL || outEncKey == NULL || outSalt == NULL) {
+    unsigned int opaqueKeyLen = 0;
+    unsigned char *opaqueKey = NULL;
+    
+    if (inKeyBytes == NULL || outEncKey == NULL || outClientData == NULL) {
         return _CLEANUP_IMPORT_PRIVATE_KEY(STATUS_FAILED, "Invalid arguments");
     }
 
     //keyType is either ECC or RSA else the calling function failed.
     if (keyType == EVP_PKEY_EC) {
-        ret = _handle_ec_import_private_key_message(correlationId, (KEYISO_EC_PKEY_ST*) inKeyBytes, &encKeySt, &salt);
+        ret = _handle_ec_import_private_key_message(correlationId, (KEYISO_EC_PKEY_ST*) inKeyBytes, &clientData, &opaqueKeyLen, &opaqueKey);
     }
     else { // EVP_PKEY_RSA or EVP_PKEY_RSA_PSS
-        ret = _handle_rsa_import_private_key_message(correlationId, (KEYISO_RSA_PKEY_ST*) inKeyBytes , &encKeySt, &salt);
+        ret = _handle_rsa_import_private_key_message(correlationId, (KEYISO_RSA_PKEY_ST*) inKeyBytes, &clientData, &opaqueKeyLen, &opaqueKey);
     }
 
     if (ret != STATUS_OK) {
        return _CLEANUP_IMPORT_PRIVATE_KEY(ret, "Import private key failed");
     }
 
-    ret = KeyIso_create_pkcs8_enckey(encKeySt, &encKey);
+    ret = KeyIso_create_pkcs8_enckey(opaqueKeyLen, (const unsigned char *)opaqueKey, &encKey);
     if (ret != STATUS_OK) {
         return _CLEANUP_IMPORT_PRIVATE_KEY(ret, "Create pkcs8 enckey failed");
     }
 
-    *outSalt = salt;
+    *outClientData = clientData;
     *outEncKey = encKey;
     return _CLEANUP_IMPORT_PRIVATE_KEY(STATUS_OK, NULL);
 }
+
 int KeyIso_client_msg_generate_rsa_key_pair(const uuid_t correlationId, unsigned int rsaBits, uint8_t keyUsage,
-    EVP_PKEY** outPubKey,  X509_SIG **outEncryptedPkey, char **outSalt)
+    EVP_PKEY** outPubKey,  X509_SIG **outEncryptedPkey, KEYISO_CLIENT_METADATA_HEADER_ST *outMetaData)
 {        
-    return _handle_rsa_generate_key_pair_message(correlationId, rsaBits, keyUsage, outPubKey, outEncryptedPkey, outSalt);
+    return _handle_rsa_generate_key_pair_message(correlationId, rsaBits, keyUsage, outPubKey, outEncryptedPkey, outMetaData);
 }
 
-
 int KeyIso_client_msg_generate_ec_key_pair(const uuid_t correlationId, unsigned int curve, uint8_t keyUsage,
-    EC_GROUP** outEcGroup, EC_KEY** outPubKey, X509_SIG **outEncryptedPkeyP8, char **outSalt)
+    EC_GROUP** outEcGroup, EC_KEY** outPubKey, X509_SIG **outEncryptedPkeyP8, KEYISO_CLIENT_METADATA_HEADER_ST *outMetaData)
 {
-    return  _handle_ec_generate_key_pair_message(correlationId, curve, keyUsage, outEcGroup, outPubKey, outEncryptedPkeyP8, outSalt);
+    return  _handle_ec_generate_key_pair_message(correlationId, curve, keyUsage, outEcGroup, outPubKey, outEncryptedPkeyP8, outMetaData);
 }
 
 void KeyIso_client_set_config(const KEYISO_CLIENT_CONFIG_ST *config)
@@ -2271,4 +2391,4 @@ void KeyIso_client_set_config(const KEYISO_CLIENT_CONFIG_ST *config)
 int KeyIso_client_open_priv_key_message(KEYISO_KEY_CTX *keyCtx)
 {
     return _handle_open_priv_key_message(keyCtx);
-} 
+}

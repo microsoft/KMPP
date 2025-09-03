@@ -15,20 +15,23 @@
 #include "keyisoservicecommon.h"
 #include "keyisoutils.h"
 
+KeyIso_get_current_valid_secret_func_ptr KeyIso_get_current_valid_secret_func;
+KeyIso_get_secret_by_id_func_ptr KeyIso_get_secret_by_id_func;
+KeyIso_get_legacy_machine_secret_func_ptr KeyIso_get_legacy_machine_secret_func;
 
-KeyIso_get_machine_secret_func_ptr KeyIso_get_machine_secret_func;
-
-int KeyIso_set_machine_secret_method(
-    const uuid_t correlationId,
-    KeyIso_get_machine_secret_func_ptr getMachineSecretFunc)
+int KeyIso_set_secret_methods(
+    KeyIso_get_current_valid_secret_func_ptr getCurrentValidSecretFunc,
+    KeyIso_get_secret_by_id_func_ptr getSecretByIdFunc,
+    KeyIso_get_legacy_machine_secret_func_ptr getLegacyMachineSecretFunc)
 {
-    if (getMachineSecretFunc == NULL) {
-        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_PFX_SECRET_TITLE,
-                               "Invalid input",
-                               "getMachineSecretFunc can't be null");
+    if (getCurrentValidSecretFunc == NULL || getSecretByIdFunc == NULL || getLegacyMachineSecretFunc == NULL) {
+        KEYISOP_trace_log_error(NULL, 0, KEYISOP_PFX_SECRET_TITLE, "Invalid input", "functions' pointers can't be null");
         return STATUS_FAILED;
     }
-    KeyIso_get_machine_secret_func = getMachineSecretFunc;
+    KeyIso_get_current_valid_secret_func = getCurrentValidSecretFunc;
+    KeyIso_get_secret_by_id_func = getSecretByIdFunc;
+    KeyIso_get_legacy_machine_secret_func = getLegacyMachineSecretFunc;
+
     return STATUS_OK;
 }
 
@@ -71,7 +74,7 @@ static int _cleanup_is_valid_salt(
 int KeyIso_is_valid_salt(
     const uuid_t correlationId,
     const char *salt,
-    unsigned char* secret)
+    const unsigned char* secret)
 {
     if (salt == NULL || secret == NULL) {
         KEYISOP_trace_log_error(correlationId, 0, KEYISOP_PFX_SECRET_TITLE, NULL, "Salt or secret is NULL");
@@ -79,11 +82,11 @@ int KeyIso_is_valid_salt(
     }
         
     // Use strnlen to safely determine the length of the salt
-    size_t saltLength = strnlen(salt, KEYISO_SECRET_SALT_STR_BASE64_LEN);
+    size_t saltLength = strnlen(salt, KEYISO_SECRET_SALT_STR_BASE64_LEGACY_LEN);
     
     // Check if the salt length is within the expected range
-    // Ensure that the length is not zero and does not exceed KEYISO_SECRET_SALT_STR_BASE64_LEN - 1
-    if (saltLength == 0 || saltLength >= KEYISO_SECRET_SALT_STR_BASE64_LEN) {
+    // Ensure that the length is not zero and does not exceed KEYISO_SECRET_SALT_STR_BASE64_LEGACY_LEN - 1
+    if (saltLength == 0 || saltLength >= KEYISO_SECRET_SALT_STR_BASE64_LEGACY_LEN) {
         KEYISOP_trace_log_error(correlationId, 0, KEYISOP_PFX_SECRET_TITLE, NULL, "Invalid salt length");
         return STATUS_FAILED;
     }
@@ -116,26 +119,24 @@ int KeyIso_generate_salt_bytes(
     const int saltBytesLength)  
 {
     const char *title = KEYISOP_PFX_SECRET_TITLE;
-    uint8_t machine_secret[KEYISO_SECRET_FILE_LENGTH] = { };
+
+    if (!KeyIso_get_legacy_machine_secret_func) {
+        KEYISOP_trace_log_error(correlationId, 0, title, NULL, "Legacy machine secret function not set");
+        return STATUS_FAILED;
+    }
+
+    const uint8_t* machineSecret = KeyIso_get_legacy_machine_secret_func();
+    if (!machineSecret) {
+        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_PFX_SECRET_TITLE, NULL, "Failed to retrieve legacy machine secret");
+        return STATUS_FAILED;
+    }
 
     if (saltBytesLength < KEYISO_SECRET_SALT_LENGTH) {
         KEYISOP_trace_log_error(correlationId, 0, title, NULL, "salt length");
         return STATUS_FAILED;
     }
 
-
-    if(!KeyIso_get_machine_secret_func){
-        KEYISOP_trace_log_error(correlationId, 0, title, NULL, "machine secret retrieval function not set");
-        return STATUS_FAILED;
-    }
-
-    if (KeyIso_get_machine_secret_func(machine_secret, sizeof(machine_secret)) != STATUS_OK) {
-        KEYISOP_trace_log_error(correlationId, 0, title, NULL, "Failed to get machine secret");
-        return STATUS_FAILED;
-    }
-
-    memcpy(saltBytes, machine_secret, KEYISO_SECRET_SALT_LENGTH);
-    KeyIso_cleanse(machine_secret, sizeof(machine_secret));     
+    memcpy(saltBytes, machineSecret, KEYISO_SECRET_SALT_LENGTH);
 
     if (KeyIso_rand_bytes(
             saltBytes + KEYISO_SECRET_SALT_LENGTH,
@@ -199,18 +200,12 @@ end:
 static int _cleanup_generate_password_from_salt(
     const uuid_t correlationId,
     int status,
-    unsigned char *hmacBytes,
-    uint8_t *machine_secret,
     const char *errStr)
 {
     const char *title = KEYISOP_IMPORT_KEY_TITLE;
     if (status == STATUS_FAILED) {
         KEYISOP_trace_log_error(correlationId, 0, title, NULL, errStr);
     }
-    if(hmacBytes){
-        KeyIso_cleanse(hmacBytes, sizeof(hmacBytes));
-    }
-    KeyIso_cleanse(machine_secret, sizeof(machine_secret));
     return status;
 }
 
@@ -219,54 +214,56 @@ int KeyIso_generate_password_from_salt(
     const char *salt,
     char **password)    // KeyIso_free()
 {
-    unsigned char *hmacKey = NULL;
-    unsigned char hmacBytes[KMPP_HMAC_SHA256_KEY_SIZE] = { 0 };
-    uint8_t machine_secret[KEYISO_SECRET_FILE_LENGTH] = { 0 };
     int encodeLength = 0;
+    unsigned char hmacBytes[KMPP_HMAC_SHA256_KEY_SIZE] = { 0 };
 
+    if (!KeyIso_get_legacy_machine_secret_func) {
+        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_PFX_SECRET_TITLE, NULL, "Legacy machine secret function not set");
+        return STATUS_FAILED;
+    }
+
+    // Retrieve the legacy machine secret
+    const uint8_t* machineSecret = KeyIso_get_legacy_machine_secret_func();
+    if (!machineSecret) {
+        KEYISOP_trace_log_error(correlationId, 0, KEYISOP_PFX_SECRET_TITLE, NULL, "Failed to retrieve legacy machine secret");
+        return STATUS_FAILED;
+    }
+    
     *password = NULL;
 
     if (salt == NULL) {
         salt = "";
     }
 
-    if(!KeyIso_get_machine_secret_func){
-        return _cleanup_generate_password_from_salt(correlationId, STATUS_FAILED, hmacBytes, machine_secret, "machine secret retrieval function not set");
-    }
-    
-    if (KeyIso_get_machine_secret_func(machine_secret, sizeof(machine_secret)) != STATUS_OK) {
-        return _cleanup_generate_password_from_salt(correlationId, STATUS_FAILED, hmacBytes, machine_secret, "Failed getting machine secret");
-    }        
-    
-    if (g_isSaltValidationRequired && !KeyIso_is_valid_salt(correlationId, salt, machine_secret)) {
-        return _cleanup_generate_password_from_salt(correlationId, STATUS_FAILED, hmacBytes, machine_secret, "Invalid salt");
+    if (g_isSaltValidationRequired && !KeyIso_is_valid_salt(correlationId, salt, machineSecret)) {
+        return _cleanup_generate_password_from_salt(correlationId, STATUS_FAILED, "Invalid salt");
     }
     
     // Key follows the secret's salt
-    hmacKey = &machine_secret[KEYISO_SECRET_SALT_LENGTH];
+    const unsigned char *hmacKey = &machineSecret[KEYISO_SECRET_SALT_LENGTH];
 
     // Use strnlen to safely determine the length of the salt.
-    size_t saltLength = strnlen(salt, KEYISO_SECRET_SALT_STR_BASE64_LEN);
+    size_t saltLength = strnlen(salt, KEYISO_SECRET_SALT_STR_BASE64_LEGACY_LEN);
     
     // Check if the salt length is within the expected range
-    // Ensure that the length is not zero and does not exceed KEYISO_SECRET_SALT_STR_BASE64_LEN - 1
-    if (saltLength == 0 || saltLength >= KEYISO_SECRET_SALT_STR_BASE64_LEN) {
-        return _cleanup_generate_password_from_salt(correlationId, STATUS_FAILED, hmacBytes, machine_secret, "Invalid salt");
+    // Ensure that the length is not zero and does not exceed KEYISO_SECRET_SALT_STR_BASE64_LEGACY_LEN - 1
+    if (saltLength == 0 || saltLength >= KEYISO_SECRET_SALT_STR_BASE64_LEGACY_LEN) {
+        return _cleanup_generate_password_from_salt(correlationId, STATUS_FAILED, "Invalid salt");
     }
 
     int ret = KeyIso_sha256_hmac_calculation(correlationId, (unsigned char*)salt, saltLength,
                                          hmacKey, KMPP_HMAC_SHA256_KEY_SIZE, hmacBytes);
     if(ret != STATUS_OK) {
-        return  _cleanup_generate_password_from_salt(correlationId, STATUS_FAILED, hmacBytes, machine_secret, "KeyIso_sha256_hmac_calculation HMAC calculation failed");
+        return  _cleanup_generate_password_from_salt(correlationId, STATUS_FAILED, "KeyIso_sha256_hmac_calculation HMAC calculation failed");
     }
 
     encodeLength = KeyIso_base64_encode(correlationId, hmacBytes, KMPP_AES_256_KEY_SIZE, password);
 
     if (!encodeLength) {
-        return  _cleanup_generate_password_from_salt(correlationId, STATUS_FAILED, hmacBytes, machine_secret, "_base64_encode failed");
+        return  _cleanup_generate_password_from_salt(correlationId, STATUS_FAILED, "_base64_encode failed");
     }
 
-    return _cleanup_generate_password_from_salt(correlationId, STATUS_OK, hmacBytes, machine_secret, NULL);
+    return _cleanup_generate_password_from_salt(correlationId, STATUS_OK, NULL);
 }
 
 /////////////////////////////////////////////////////
@@ -402,29 +399,18 @@ static const size_t inMsgMinStructSizes[] = {
 };
 
 static size_t _open_private_key_msg_in_length(const uint8_t *inSt, const PFN_mem_move memMove)
-{    
-    // getting the offset of the inner structure encKeySt inside the KEYISO_OPEN_PRIV_KEY_IN_ST
-    size_t encKeyStOffset = offsetof(KEYISO_OPEN_PRIV_KEY_IN_ST, encKeySt);
+{
+    size_t publicKeyLenOffset = offsetof(KEYISO_OPEN_PRIV_KEY_IN_ST, publicKeyLen);
+    uint32_t publicKeyLenFieldValue = 0;
+    memMove(&publicKeyLenFieldValue, inSt + publicKeyLenOffset, sizeof(uint32_t));
 
-    // Getting the values (from the inSt) of the followings fields saltLen, ivLen, hmacLen, encKeyLen 
-    uint32_t saltLenFieldValue = 0;
-    memMove(&saltLenFieldValue, inSt + encKeyStOffset + offsetof(KEYISO_ENCRYPTED_PRIV_KEY_ST, saltLen), sizeof(uint32_t));
-        
-    uint32_t ivLenFieldValue = 0;    
-    memMove(&ivLenFieldValue, inSt + encKeyStOffset + offsetof(KEYISO_ENCRYPTED_PRIV_KEY_ST, ivLen), sizeof(uint32_t));
-        
-    uint32_t hmacLenFieldValue = 0;
-    memMove(&hmacLenFieldValue, inSt + encKeyStOffset + offsetof(KEYISO_ENCRYPTED_PRIV_KEY_ST, hmacLen), sizeof(uint32_t));
-    
-    uint32_t encKeyLenFieldValue = 0;
-    memMove(&encKeyLenFieldValue, inSt + encKeyStOffset + offsetof(KEYISO_ENCRYPTED_PRIV_KEY_ST, encKeyLen), sizeof(uint32_t));
-                
+    size_t opaqueEncryptedKeyLenOffset = offsetof(KEYISO_OPEN_PRIV_KEY_IN_ST, opaqueEncryptedKeyLen);
+    uint32_t opaqueEncryptedKeyLenFieldValue = 0;    
+    memMove(&opaqueEncryptedKeyLenFieldValue, inSt + opaqueEncryptedKeyLenOffset, sizeof(uint32_t));
+
     // Calculating the size of the dynamic array
     uint32_t openInStDynamicArraySize = 0;
-    if (!KEYISO_ADD_OVERFLOW(saltLenFieldValue, ivLenFieldValue, &openInStDynamicArraySize) &&
-        !KEYISO_ADD_OVERFLOW(openInStDynamicArraySize, hmacLenFieldValue, &openInStDynamicArraySize) &&
-        !KEYISO_ADD_OVERFLOW(openInStDynamicArraySize, encKeyLenFieldValue, &openInStDynamicArraySize)) { 
-        // Calculating the size of the in structure (where as the dynamic array length == openInStDynamicArraySize)
+    if (!KEYISO_ADD_OVERFLOW(publicKeyLenFieldValue, opaqueEncryptedKeyLenFieldValue, &openInStDynamicArraySize)) { 
         return GET_DYNAMIC_STRUCT_SIZE(KEYISO_OPEN_PRIV_KEY_IN_ST, openInStDynamicArraySize);
     }
     
@@ -489,7 +475,11 @@ static size_t _rsa_private_enc_dec_in_length(const uint8_t *inSt, const PFN_mem_
         KEYISOP_trace_log_error(NULL, 0, KEYISOP_SERVICE_TITLE, "", "Invalid input length");
     } else {        
         // Calculating the size of the in structure (where as the dynamic array length == fromBytesLenFieldValue)
-        size_t dynamicLen = KeyIso_get_rsa_enc_dec_params_dynamic_len(fromBytesLenFieldValue, labelLenFieldValue);
+        uint32_t dynamicLen = 0;
+        if (KeyIso_get_rsa_enc_dec_params_dynamic_len(fromBytesLenFieldValue, labelLenFieldValue, &dynamicLen) != STATUS_OK) {
+            KEYISOP_trace_log_error(NULL, 0, KEYISOP_SERVICE_TITLE, "", "Invalid input length");
+            return 0;
+        }
         inStLenCalc = GET_DYNAMIC_STRUCT_SIZE(KEYISO_RSA_PRIVATE_ENC_DEC_IN_ST, dynamicLen);
     }
     return inStLenCalc;
@@ -613,4 +603,26 @@ size_t KeyIso_msg_in_length(int command, const uint8_t *inSt, size_t inLen, cons
         return 0;
     }
     return estimated_length;
+}
+
+int KeyIso_get_enc_key_bytes_len(const KEYISO_ENCRYPTED_PRIV_KEY_ST *encKeySt, uint32_t *outLen)
+{
+    const char *title = KEYISOP_ENC_KEY_TITLE;
+    if (encKeySt == NULL || outLen == NULL) {
+        KEYISOP_trace_log_error(NULL, 0, title, "KeyIso_get_enc_key_bytes_len", "Invalid parameters");
+        return STATUS_FAILED;
+    }
+    *outLen = 0;
+
+    uint32_t totalLen = 0;
+    if (KEYISO_ADD_OVERFLOW(encKeySt->secretSaltLen, encKeySt->ivLen, &totalLen) ||
+        KEYISO_ADD_OVERFLOW(totalLen, encKeySt->hmacLen, &totalLen) ||
+		KEYISO_ADD_OVERFLOW(totalLen, encKeySt->secretIdLen, &totalLen) ||
+        KEYISO_ADD_OVERFLOW(totalLen, encKeySt->encKeyLen, &totalLen)) {
+            KEYISOP_trace_log_error(NULL, 0, title, "KeyIso_get_enc_key_bytes_len", "Addition overflow");
+            return STATUS_FAILED;
+    }
+
+    *outLen = totalLen;
+    return STATUS_OK;
 }

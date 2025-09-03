@@ -43,6 +43,9 @@ static ERR_STRING_DATA KMPP_str_reasons[] = {
     {ERR_PACK(0, 0, KeyIsoErrReason_FailedToSetKeyAttributes), "failed to set key attributes"},
     {ERR_PACK(0, 0, KeyIsoErrReason_FailedToGetConf), "failed to get configuration"},
     {ERR_PACK(0, 0, KeyIsoErrReason_FailedToEditAltNamesSection), "failed to edit alt names section"},
+    {ERR_PACK(0, 0, KeyIsoErrReason_FailedToDeriveInit), "failed to initialize key derivation"},
+    {ERR_PACK(0, 0, KeyIsoErrReason_FailedToSetDerivedKeyPeer), "failed to set peer key for derivation"},
+    {ERR_PACK(0, 0, KeyIsoErrReason_FailedToDeriveKey), "failed to derive shared secret"},
     {ERR_PACK(0, 0, KeyIsoErrReason_UnsupportedScheme), "unsupported scheme"},
     {ERR_PACK(0, 0, KeyIsoErrReason_UnsupportedPadding), "unsupported padding"},
     {ERR_PACK(0, 0, KeyIsoErrReason_UnsupportedDataType), "unsupported data type"},
@@ -51,12 +54,14 @@ static ERR_STRING_DATA KMPP_str_reasons[] = {
     {ERR_PACK(0, 0, KeyIsoErrReason_UnsupportedNumberOfPrimes), "unsupported number of primes"},
     {ERR_PACK(0, 0, KeyIsoErrReason_UnsupportedFormat), "unsupported format"},
     {ERR_PACK(0, 0, KeyIsoErrReason_UnsupportedKeyType), "unsupported key type"},
+    {ERR_PACK(0, 0, KeyIsoErrReason_UnsupportedCurve), "unsupported curve"},
     {ERR_PACK(0, 0, KeyIsoErrReason_InvalidStoreCtx), "invalid store context"},
     {ERR_PACK(0, 0, KeyIsoErrReason_InvalidMsgDigest), "invalid message digest"},
     {ERR_PACK(0, 0, KeyIsoErrReason_InvalidParams), "invalid parameters"},
     {ERR_PACK(0, 0, KeyIsoErrReason_InvalidKeySize), "invalid key size"},
     {ERR_PACK(0, 0, KeyIsoErrReason_InvalidKeyId), "invalid key type"},
     {ERR_PACK(0, 0, KeyIsoErrReason_InvalidLength), "invalid length"},
+    {ERR_PACK(0, 0, KeyIsoErrReason_InvalidCurve), "invalid curve"},
     {ERR_PACK(0, 0, KeyIsoErrReason_HeaderNotFound), "header not found"},
     {ERR_PACK(0, 0, KeyIsoErrReason_InvalidSignatureLength), "invalid signature length"},
     {ERR_PACK(0, 0, KeyIsoErrReason_FailedEncodingPublicKey), "failed to encode public key"},
@@ -98,7 +103,9 @@ void ERR_KMPP_error(int reason)
         lib_code = ERR_get_next_error_library();
     }
 
-    ERR_raise(lib_code, reason);
+    if (reason != KeyIsoErrReason_NoError) {
+        ERR_raise(lib_code, reason);
+    }
 }
 
 void ERR_KMPP_error_para(int reason, const char *fmt, ...)

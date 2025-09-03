@@ -22,13 +22,13 @@ int KeyIso_parse_pfx_provider_key_id(
     const char *keyId,
     int *pfxLength,
     unsigned char **pfxBytes,         // KeyIso_clear_free()
-    char **salt);                     // Optional, KeyIso_clear_free_string()
+    char **clientData);               // Salt for legacy/ Client data for kmpp key, KeyIso_clear_free_string()
 
 int KeyIso_format_pfx_provider_key_id(
     const uuid_t correlationId,
     int pfxLength,
     const unsigned char *pfxBytes,
-    const char *salt,
+    const char *clientData,
     char **keyId);                    // KeyIso_clear_free_string()
 
 #ifdef  __cplusplus

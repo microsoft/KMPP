@@ -148,7 +148,7 @@ int KeyIso_client_tpm_msg_generate_rsa_key_pair(
     uint8_t keyUsage, 
     EVP_PKEY **outPubKey,
     X509_SIG **outEncryptedKeyData,
-    char **outParam)
+    KEYISO_CLIENT_METADATA_HEADER_ST *outMetaData)
 {
     const char* title = KEYISOP_TPM_GEN_KEY_TITLE;
     KEYISO_TPM_KEY_DATA* keyData = NULL;
@@ -248,14 +248,14 @@ int KeyIso_client_tpm_msg_generate_ec_key_pair(
     EC_GROUP** outGroup,
     EC_KEY** outPubKey,
     X509_SIG** outEncryptedPkeyP8,
-    char**  outParam)
+    KEYISO_CLIENT_METADATA_HEADER_ST *outMetaData)
 {
     const char* title = KEYISOP_TPM_GEN_KEY_TITLE;
     const char* password = NULL;
     KEYISO_TPM_RET res = KEYISO_TPM_RET_FAILURE;
     KEYISO_TPM_KEY_DATA* keyData = NULL;
 
-    (void)outParam; // Not used in TPM
+    (void)outMetaData; // Not used in TPM
 
     if ( outEncryptedPkeyP8 == NULL || outPubKey == NULL || outGroup == NULL ) {
         KEYISOP_trace_log_error(correlationId, 0, KEYISOP_GEN_KEY_TITLE, "generate ec key pair", "invalid parameters");
@@ -484,7 +484,8 @@ int KeyIso_client_tpm_msg_rsa_private_encrypt_decrypt(
     const unsigned char *from,
     int tlen,
     unsigned char *to,
-    int padding)
+    int padding,
+    int labelLen)
 {
     char* title = KEYISOP_TPM_RSA_PRIV_ENC_DEC_TITE;
     int res = -1;
@@ -502,8 +503,9 @@ int KeyIso_client_tpm_msg_rsa_private_encrypt_decrypt(
             return res;
         }
         case KEYISO_IPC_RSA_PRIV_DECRYPT:
-        {
-            return KeyIso_TPM_rsa_private_decrypt(keyCtx->correlationId, keyDetails, flen, from, tlen, to, padding);
+        {    
+            // TPM currently supports OAEP padding but does not support custom OAEP labels (only empty labels are supported)
+            return KeyIso_TPM_rsa_private_decrypt(keyCtx->correlationId, keyDetails, flen, from, tlen, to, padding, labelLen);
         }
         case KEYISO_IPC_RSA_SIGN:
         {
@@ -556,11 +558,13 @@ int KeyIso_client_tpm_msg_import_private_key(
     int keyType,
     const unsigned char *inKeyBytes,
     X509_SIG **outEncKey,
-    char **outParam)
+    KEYISO_CLIENT_DATA_ST **outClientData)
 {
+    // No need to cast outClientData since it's now the correct type
     KEYISOP_trace_log_error(correlationId, 0, KEYISOP_TPM_IMPORT_PRIVATE_KEY_TITLE, "import private key", "not supported");
     return STATUS_FAILED;
 }
+
 
 int KeyIso_client_tpm_msg_import_symmetric_key(
     const uuid_t correlationId, 
@@ -569,7 +573,8 @@ int KeyIso_client_tpm_msg_import_symmetric_key(
     const unsigned char *inKeyBytes,
     const unsigned char *inImportKeyId,
     unsigned int *outKeyLength, 
-    unsigned char **outKeyBytes)
+    unsigned char **outKeyBytes,
+    char **outClientData)
 {
     KEYISOP_trace_log_error(correlationId, 0, KEYISOP_TPM_IMPORT_SYMMETRIC_KEY_TITLE, "import symmetric key", "not supported");
     return STATUS_FAILED;

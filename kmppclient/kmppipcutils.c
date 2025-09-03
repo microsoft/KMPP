@@ -10,6 +10,9 @@
 #include "keyisocommon.h"
 #include "keyisoipcgenericmessage.h"
 #include "keyisoipccommands.h"
+#include "keyisoservicecommon.h"
+#include  "keyisolog.h"
+#include "keyisoclientinternal.h"
 
 #define KMPP_RSA_COMMON_PRIVATE_KEY_LEN         4096
 #define KMPP_RSA_DEFAULT_PUBLIC_EXPONENT_LEN    3   // The default exponent value is 65537 (2^16+1)
@@ -35,16 +38,25 @@ static size_t _get_estimate_import_priv_key_out_len(int command, IPC_SEND_RECEIV
 {
     void *inKey = NULL;              // KEYISO_RSA_PKEY_ST or KEYISO_EC_PKEY_ST
     size_t inKeyLen = 0;             // size of the input private key
-    size_t dynamicLen = 0;           // size of the dynamic part of the structure
+    uint32_t dynamicLen = 0;         // size of the dynamic part of the structure
+    uint32_t totalDynamicLen = 0;    // size of the total dynamic part of the output structure
     unsigned int paddedKeyLen = 0;   // size of the padded key
 
     //1. Calculating the size of the input private key
     if (command == IpcCommand_ImportRsaPrivateKey) {
         inKey = &((KEYISO_IMPORT_RSA_PRIV_KEY_IN_ST *)ipcSt->inSt)->pkeySt;
-        inKeyLen = GET_DYNAMIC_STRUCT_SIZE(KEYISO_RSA_PKEY_ST, KeyIso_get_rsa_pkey_bytes_len((KEYISO_RSA_PKEY_ST *)inKey));
+        if (KeyIso_get_rsa_pkey_bytes_len((KEYISO_RSA_PKEY_ST *)inKey, &dynamicLen) != STATUS_OK) {
+            KEYISOP_trace_log_error(NULL, 0, KEYISOP_RSA_PKEY_ENC_DEC_TITE, "KeyIso_get_rsa_pkey_bytes_len", "Failed to get rsa pkey bytes len");
+            return 0;
+        }
+        inKeyLen = GET_DYNAMIC_STRUCT_SIZE(KEYISO_RSA_PKEY_ST, dynamicLen);
     } else if (command == IpcCommand_ImportEcPrivateKey){
         inKey = &((KEYISO_IMPORT_EC_PRIV_KEY_IN_ST *)ipcSt->inSt)->pkeySt;
-        inKeyLen = GET_DYNAMIC_STRUCT_SIZE(KEYISO_EC_PKEY_ST, KeyIso_get_ec_pkey_bytes_len((KEYISO_EC_PKEY_ST *)inKey));
+        if (KeyIso_get_ec_pkey_bytes_len((KEYISO_EC_PKEY_ST *)inKey, &dynamicLen) != STATUS_OK) {
+            KEYISOP_trace_log_error(NULL, 0, KEYISOP_ECDSA_PKEY_SIGN_TITLE, "KeyIso_get_ec_pkey_bytes_len", "Failed to get ec pkey bytes len");
+            return 0;
+        }
+        inKeyLen = GET_DYNAMIC_STRUCT_SIZE(KEYISO_EC_PKEY_ST, dynamicLen);
     }
     
     //2. Adding extra bytes for storing the type of the key
@@ -53,11 +65,13 @@ static size_t _get_estimate_import_priv_key_out_len(int command, IPC_SEND_RECEIV
     //3. Calculating the size of the padded key
     paddedKeyLen = KeyIso_get_key_padded_size(inKeyLen);
     
-    //4. Adding the size of the salt, IV, and HMAC to the padded key
-    dynamicLen = KEYISO_KDF_SALT_LEN + KMPP_AES_BLOCK_SIZE + KMPP_HMAC_SHA256_KEY_SIZE + (size_t)paddedKeyLen;
-    
-    //5. Adding the dynamic length to the size of the strucutre
-    return GET_DYNAMIC_STRUCT_SIZE(KEYISO_IMPORT_PRIV_KEY_OUT_ST, dynamicLen);
+
+    //4. Adding the size of the IV, HMAC and salt to the padded key
+    dynamicLen = KMPP_AES_BLOCK_SIZE + KMPP_HMAC_SHA256_KEY_SIZE + KMPP_SALT_SHA256_SIZE + (size_t)paddedKeyLen + KMPP_MAX_SECRET_ID_SIZE;
+
+    //5. Adding the dynamic length to the size of the structure
+    totalDynamicLen = GET_DYNAMIC_STRUCT_SIZE(KEYISO_ENCRYPTED_PRIV_KEY_ST, dynamicLen);
+    return GET_DYNAMIC_STRUCT_SIZE(KEYISO_IMPORT_PRIV_KEY_OUT_ST, totalDynamicLen);
 }
 
 static size_t _get_estimate_generate_rsa_key_out_len(int command, IPC_SEND_RECEIVE_ST *ipcSt)
@@ -69,25 +83,27 @@ static size_t _get_estimate_generate_rsa_key_out_len(int command, IPC_SEND_RECEI
     size_t inKeyLen = 0;              // size of the input private key structure (in bytes)
     size_t rsaKeyLen = 0;             // length of the input private key (in bytes)   
     size_t dynamicLen = 0;            // size of the dynamic part of the structure (in bytes)
+    size_t totalDynamicLen = 0;       // size of the total dynamic part of the output structure (in bytes)
 
-    //1. Calculating the size of the generated private key elements
+    // Calculating the size of the generated private key elements
     rsaModulusLen = INT_TO_BYTESIZE(((KEYISO_GEN_RSA_KEY_PAIR_IN_ST *)ipcSt->inSt)->bits);
     rsaPublicExpLen = KMPP_RSA_DEFAULT_PUBLIC_EXPONENT_LEN;
 
-    //2. Calculating the size of the generated public key
+    // Calculating the size of the generated public key
     pubKeyLen = rsaModulusLen + rsaPublicExpLen;
 
-    //3. Calculating the size of the encrypted private key
+    // Calculating the size of the encrypted private key
     // RSA key length = (modulus length * (numbers of primes)) + public exponent length
     rsaKeyLen = (rsaModulusLen * KEYISO_SYMCRYPT_RSA_SUPPORTED_NUM_OF_PRIMES) + rsaPublicExpLen;
     inKeyLen = GET_DYNAMIC_STRUCT_SIZE(KEYISO_RSA_PKEY_ST, rsaKeyLen) + sizeof(int); // sizeof(KmppKeyType)
     encKeyLen = KeyIso_get_key_padded_size(inKeyLen);
     
-    //4. Calculating the size of the dynamic part of the structure
-    dynamicLen = KEYISO_KDF_SALT_LEN + KMPP_AES_BLOCK_SIZE + KMPP_HMAC_SHA256_KEY_SIZE + (size_t)encKeyLen + (size_t)pubKeyLen;
+    // Calculating the size of the dynamic part of the structure
+    dynamicLen = KMPP_AES_BLOCK_SIZE + KMPP_HMAC_SHA256_KEY_SIZE + KMPP_SALT_SHA256_SIZE + (size_t)encKeyLen + (size_t)pubKeyLen + KMPP_MAX_SECRET_ID_SIZE;
     
-    //5. Returning the total size of the structure
-    return GET_DYNAMIC_STRUCT_SIZE(KEYISO_GEN_RSA_KEY_PAIR_OUT_ST, dynamicLen);
+    // Returning the total size of the structure
+    totalDynamicLen = GET_DYNAMIC_STRUCT_SIZE(KEYISO_ENCRYPTED_PRIV_KEY_ST, dynamicLen);
+    return GET_DYNAMIC_STRUCT_SIZE(KEYISO_GEN_RSA_KEY_PAIR_OUT_ST, totalDynamicLen);
 }
 
 static size_t _get_field_size_in_bytes(unsigned int curve)
@@ -114,6 +130,7 @@ static size_t _get_estimate_generate_ecc_key_out_len(int command, IPC_SEND_RECEI
     size_t fieldLen = 0;              // size of the field (in bytes)
     size_t inKeyLen = 0;              // size of the input private key structure (in bytes)
     size_t dynamicLen = 0;            // size of the dynamic part of the structure (in bytes)
+    size_t totalDynamicLen = 0;       // size of the total dynamic part of the output structure (in bytes)
     unsigned int encKeyLen = 0;       // length of the encrypted key (in bytes)
 
     //1. Getting the size (in bytes) of the prime field defined by the curve
@@ -125,10 +142,11 @@ static size_t _get_estimate_generate_ecc_key_out_len(int command, IPC_SEND_RECEI
     encKeyLen = KeyIso_get_key_padded_size(inKeyLen);
     
     //3. Calculating the size of the dynamic part of the structure
-    dynamicLen = KEYISO_KDF_SALT_LEN + KMPP_AES_BLOCK_SIZE + KMPP_HMAC_SHA256_KEY_SIZE + (size_t)encKeyLen + (fieldLen * 2);
-    
+    dynamicLen = KMPP_AES_BLOCK_SIZE + KMPP_HMAC_SHA256_KEY_SIZE + KMPP_SALT_SHA256_SIZE + (size_t)encKeyLen + (fieldLen * 2) + KMPP_MAX_SECRET_ID_SIZE;
+
     //4. Returning the total size of the structure
-    return GET_DYNAMIC_STRUCT_SIZE(KEYISO_GEN_EC_KEY_PAIR_OUT_ST, dynamicLen);
+    totalDynamicLen = GET_DYNAMIC_STRUCT_SIZE(KEYISO_ENCRYPTED_PRIV_KEY_ST, dynamicLen);
+    return GET_DYNAMIC_STRUCT_SIZE(KEYISO_GEN_EC_KEY_PAIR_OUT_ST, totalDynamicLen);
 }
 
 static size_t _get_estimate_rsa_encrypt_decrypt_out_len(int command, IPC_SEND_RECEIVE_ST *ipcSt)

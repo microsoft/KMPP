@@ -289,6 +289,30 @@ if(KMPP_OPENSSL_3)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DKMPP_OPENSSL_3")
 endif()
 
+if(KMPP_OPENSSL_3)
+    set(KMPP_KEYS_IN_USE_LIB_PATH "/usr/lib/ossl-modules/symcryptprovider.so")
+else()
+    set(KMPP_KEYS_IN_USE_LIB_PATH "/usr/lib/libkeysinuse.so")
+endif()
+
+# Add KMPP_KEYS_IN_USE_LIB_PATH as a compile definition
+add_definitions(-DKMPP_KEYS_IN_USE_LIB_PATH="${KMPP_KEYS_IN_USE_LIB_PATH}")
+
+# Check if the keys-in-use library exists when building for OVL (applicable only for OVL builds)
+if(NOT KMPP_GENERAL_PURPOSE_TARGET)
+    if(NOT EXISTS "${KMPP_KEYS_IN_USE_LIB_PATH}")
+        message(FATAL_ERROR 
+            "Keys-in-use library not found at: ${KMPP_KEYS_IN_USE_LIB_PATH}\n"
+            "This library is required when KMPP_GENERAL_PURPOSE_TARGET is OFF.\n"
+            "Please ensure the library is installed at the expected location:\n"
+            "  - For OpenSSL 3.x: /usr/lib/ossl-modules/symcryptprovider.so\n"
+            "  - For OpenSSL 1.x: /usr/lib/libkeysinuse.so\n")
+    else()
+        message(STATUS "Keys-in-use library found at: ${KMPP_KEYS_IN_USE_LIB_PATH}")
+    endif()
+endif()
+
+
 set(KMPP_OPENSSL_ENGINE_DIR "${CMAKE_INSTALL_LIBDIR}/engines-1.1")
 # Update openSSL engine directory according to version
 execute_process(
@@ -486,13 +510,14 @@ set(kmpp_service_common_src
   kmppservice/keyisoservicecryptosymcrypt.c
   kmppservice/keyisoservicekeygen.c
   kmppservice/keyisoservicesymmetrickey.c
+  kmppservice/keyisoguidlookuparraycache.c
+  
   # IPC
   kmppservice/keyisoipcserviceadapter.c
   kmppservice/keyisoservicemsghandler.c
   kmppservice/keyisoserviceinprocmsghandler.c
   kmppservice/kmppgdbusmsghandler.c       # KeyIso_gdbus_handle_client_message
   kmppservice/keyisoservicekeylistgdbus.c # KeyIso_add_gdbus_sender_to_list
-
 )
 
 if (KMPP_GENERAL_PURPOSE_TARGET)
@@ -511,6 +536,9 @@ set(kmpp_service_ossl_src
   ${kmpp_service_common_src}
   kmppservice/ossl/deprecatedServiceMessageHandler.c
   kmppservice/ossl/keyisoserviceapiossl.c 
+  # Machine secret rotation - for process based service 
+  kmppservice/keyisomachinesecretrotation.c
+  kmppservice/keyisomachinesecretlegacy.c
 )
 
 macro(CreateLib lib_name obj shared_lib ossl_support)
@@ -563,6 +591,7 @@ set(service_lib_list
 set(client_lib_list
   ${ossl_lib_list}
   ${DBUS_LIBRARIES}
+  dl
 )
 
 if (KMPP_GENERAL_PURPOSE_TARGET)
@@ -575,6 +604,7 @@ set(FUZZING_FLAGS "-g3 -fsanitize=fuzzer -fsanitize=address \
 # Service side lib
 add_library(kmpp_service_obj OBJECT ${kmpp_service_ossl_src})
 CreateLib(kmppsrv kmpp_service_obj kmpp_service_shared TRUE ${service_ossl_lib_list})
+target_link_libraries(kmpp_service_shared Threads::Threads)
 
 if (KMPP_GENERAL_PURPOSE_TARGET AND KMPP_DEBUG)
   set_target_properties(kmpp_service_shared PROPERTIES COMPILE_FLAGS ${FUZZING_FLAGS})
@@ -584,6 +614,8 @@ list(APPEND client_lib_list kmpp_service_shared)
 # Client side lib - currently the client code is always dependend on OpenSSL 
 add_library(kmpp_obj OBJECT ${kmpp_src})
 CreateLib(kmpp kmpp_obj kmpp_shared TRUE ${client_lib_list})
+# Explicitly link pthread to resolve pthread_once symbol
+target_link_libraries(kmpp_shared Threads::Threads)
 if (KMPP_GENERAL_PURPOSE_TARGET AND KMPP_DEBUG)
   set_target_properties(kmpp_shared PROPERTIES COMPILE_FLAGS ${FUZZING_FLAGS})
 endif()

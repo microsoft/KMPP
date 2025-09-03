@@ -3,6 +3,7 @@
  * Licensed under the MIT License
  */
 
+#include <dlfcn.h>
 #include <openssl/conf.h>
 #include <openssl/err.h>
 #include <stdbool.h>
@@ -35,10 +36,79 @@ extern CLIENT_MSG_HANDLER_FUNCTIONS_TABLE_ST keyIsoMsgHandlerImplementation;
 CLIENT_MSG_HANDLER_FUNCTIONS_TABLE_ST g_msgHandlerImplementation;
 KEYISO_CLIENT_CONFIG_ST g_config;
 
+// Global instance of KeysInUse state and functions
+KEYISO_KEYSINUSE_ST g_keysinuse = {0}; // Initialize the KeysInUse state
+
 static CRYPTO_ONCE selectedKeyIsoSolutionTypeOnce = CRYPTO_ONCE_STATIC_INIT; // Make sure that the selectedKeyIsoSolutionType is initialized only once
+static CRYPTO_ONCE keysinuse_init_once = CRYPTO_ONCE_STATIC_INIT;
+
+static void _unload_keysInUse_library()
+{   
+    g_keysinuse.isLibraryLoaded = false;
+    g_keysinuse.load_key_func = NULL;
+    g_keysinuse.on_use_func = NULL;
+    g_keysinuse.unload_key_func = NULL;
+    g_keysinuse.get_key_identifier_func = NULL;
+
+    if (g_keysinuse.handle) {
+        if (dlclose(g_keysinuse.handle) != 0) {
+            char *error = dlerror();
+            KEYISOP_trace_log_error_para(NULL, 0, KEYISOP_LOAD_LIB_TITLE, "Failed to unload KeysInUse shared library", "%s", error);
+        }
+        g_keysinuse.handle = NULL;
+    }
+}
+
+static void _load_keysInUse_library_once(void)
+{ 
+    g_keysinuse.isLibraryLoaded = false;
+    
+    // Explicit validation that the path is absolute and trusted
+    if (KMPP_KEYS_IN_USE_LIB_PATH[0] != '/') {
+        KEYISOP_trace_log_para(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_LOAD_LIB_TITLE, "Invalid library path", "The library path is not absolute", "path: %s", KMPP_KEYS_IN_USE_LIB_PATH);
+        return;
+    }
+    
+    g_keysinuse.handle = dlopen(KMPP_KEYS_IN_USE_LIB_PATH, RTLD_NOW);
+    if (!g_keysinuse.handle) {        
+        KEYISOP_trace_log_para(NULL, KEYISOP_TRACELOG_VERBOSE_FLAG, KEYISOP_LOAD_LIB_TITLE, "Failed to load KeysInUse shared library", "%s", dlerror());        
+        return;
+    }
+
+    dlerror(); // Clear any existing error
+    // Load all function pointers
+    g_keysinuse.load_key_func = (keysinuse_load_key_func_ptr)dlsym(g_keysinuse.handle, "keysinuse_load_key");
+    g_keysinuse.on_use_func = (keysinuse_on_use_func_ptr)dlsym(g_keysinuse.handle, "keysinuse_on_use");
+    g_keysinuse.unload_key_func = (keysinuse_unload_key_func_ptr)dlsym(g_keysinuse.handle, "keysinuse_unload_key");
+    g_keysinuse.get_key_identifier_func = (keysinuse_get_key_identifier_func_ptr)dlsym(g_keysinuse.handle, "keysinuse_ctx_get_key_identifier");
+
+    char *error = dlerror();
+    // Verify all functions were loaded
+    if (!g_keysinuse.load_key_func || !g_keysinuse.on_use_func || !g_keysinuse.unload_key_func || !g_keysinuse.get_key_identifier_func || error != NULL) {
+        const char *errorMsg = error ? error : "Unknown error";
+        KEYISOP_trace_log_para(NULL, 0, KEYISOP_LOAD_LIB_TITLE, "Failed to load KeysInUse functions", "%s", errorMsg);        
+        _unload_keysInUse_library();     
+        return;
+    }
+    
+    g_keysinuse.isLibraryLoaded = true;        
+}
+
+bool KeyIso_load_keysInUse_library()
+{
+    CRYPTO_THREAD_run_once(&keysinuse_init_once, _load_keysInUse_library_once);    
+    return g_keysinuse.isLibraryLoaded;
+}
 
 static void _set_isolation_solution(KeyIsoSolutionType solution, CLIENT_MSG_HANDLER_FUNCTIONS_TABLE_ST msgHandlerImp, bool isDefaultSolutionType) 
 {
+    // legacymode should be set to true when the OVL version is less than 3 and also it is not gb200 
+    g_config.isLegacyMode = false;  // legacy mode means creating MsCrypt key format
+#ifndef KMPP_GENERAL_PURPOSE_TARGET
+    if (KeyIso_get_isolation_solution_for_tz() != KeyIsoSolutionType_tz) {
+        g_config.isLegacyMode = true;
+    }
+#endif
     g_config.solutionType = solution;
     g_config.isDefaultSolutionType = isDefaultSolutionType;
     g_msgHandlerImplementation = msgHandlerImp;
@@ -54,6 +124,7 @@ static void _set_default_isolation_solution()
 #endif
     CLIENT_MSG_HANDLER_FUNCTIONS_TABLE_ST msgHandlerImp = keyIsoMsgHandlerImplementation;
     _set_isolation_solution(solution, msgHandlerImp, true);
+    g_config.isKmppEnabledByDefault = false;
 }
 
 static KeyIsoSolutionType _get_solution_type(const char *solutionType)
@@ -123,7 +194,7 @@ static void _kmpp_client_load_config()
     CONF *conf = NULL;
     const char* title = KEYISOP_LOAD_LIB_TITLE;
     KeyIsoSolutionType solution = KeyIsoSolutionType_invalid;
-    CLIENT_MSG_HANDLER_FUNCTIONS_TABLE_ST msgHandlerImp;  
+    CLIENT_MSG_HANDLER_FUNCTIONS_TABLE_ST msgHandlerImp;
 
     if (_validate_and_load_config(KMPP_CUSTOM_CONFIG_PATH, &conf) == STATUS_FAILED) {
         _set_default_isolation_solution();
@@ -134,22 +205,24 @@ static void _kmpp_client_load_config()
     solution = _get_solution_type_from_config(conf);
     if (solution == KeyIsoSolutionType_invalid) {
         _set_default_isolation_solution();
+        NCONF_free(conf);
         return;
     }
 
-    // Set the enable by default flag per the subscription acoording to the configuration
+    // Set the enable by default flag per the subscription according to the configuration
     g_config.isKmppEnabledByDefault = _get_enable_by_default_from_config(conf);
 
     // Set message handler implementation based on solution type
     switch (solution) {
         case KeyIsoSolutionType_process:
-#ifndef KMPP_GENERAL_PURPOSE_TARGET
-        case KeyIsoSolutionType_tz:
-            solution = KeyIso_get_isolation_solution_for_tz(); 
-#endif
             msgHandlerImp = keyIsoMsgHandlerImplementation;
             break;
-#ifdef KMPP_GENERAL_PURPOSE_TARGET
+#ifndef KMPP_GENERAL_PURPOSE_TARGET
+        case KeyIsoSolutionType_tz:
+            solution = KeyIso_get_isolation_solution_for_tz();
+            msgHandlerImp = keyIsoMsgHandlerImplementation;
+            break;
+#else
         case KeyIsoSolutionType_tpm:
             msgHandlerImp = TPMMsgHandlerImplementation;
             g_config.tpmConfig = KeyIso_load_tpm_config(conf);
@@ -158,6 +231,7 @@ static void _kmpp_client_load_config()
         default:
             KEYISOP_trace_log_error_para(NULL, 0, title, "config load failed", "invalid solution type", "solutionType %d", solution);
             _set_default_isolation_solution();
+            NCONF_free(conf);
             return;
     }
     // Set isolation solution
@@ -182,9 +256,18 @@ __attribute__((constructor))
 void kmpp_client_init(void)
 {
     KEYISOP_traceLogConstructor = 1; // to enable logging in the constructor scope
+    
     _init_selected_keyIso_solution();
 #ifdef KMPP_GENERAL_PURPOSE_TARGET
     KeyIso_validate_user_privileges(g_config.solutionType);
 #endif
     KEYISOP_traceLogConstructor = 0;
+}
+
+__attribute__((destructor))
+void kmpp_client_cleanup(void)
+{
+    if (g_keysinuse.isLibraryLoaded) {
+        _unload_keysInUse_library();
+    }
 }

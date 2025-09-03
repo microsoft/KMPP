@@ -57,6 +57,10 @@ void KeyIso_cleanse(
 char* KeyIso_strndup(
     const char *str,
     size_t maxStrLen);
+
+unsigned char *KeyIso_memdup(
+    const void *src,
+    size_t len);
     
 
 ////~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~////
