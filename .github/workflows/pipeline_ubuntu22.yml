@@ -16,10 +16,10 @@ jobs:
     
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v2
+      uses: actions/checkout@0717577d45739eb3c851188b29f50ed6c0b2194e # v2.8.0
 
     - name: Set up CMake
-      uses: jwlawson/actions-setup-cmake@v1
+      uses: jwlawson/actions-setup-cmake@d06b37b47cfd043ec794ffa3e40e0b6b5858a7ec # v1.14.2
 
     - name: Install dependencies
       run: |

@@ -22,7 +22,7 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v3
+      uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3.7.0
       with:
         fetch-depth: 0  # Fetch all history for accurate analysis
 
@@ -47,12 +47,12 @@ jobs:
     # Setup .NET for C# analysis
     - name: Setup .NET
       if: ${{ matrix.language == 'csharp' }}
-      uses: actions/setup-dotnet@v3
+      uses: actions/setup-dotnet@55ec9447dda3d1cf6bd587150f3262f30ee10815 # v3.4.2
       with:
         dotnet-version: '6.0.x'
 
     - name: Initialize CodeQL
-      uses: github/codeql-action/init@v3
+      uses: github/codeql-action/init@42947a340483f03ba47bb1a039b2c519aab3df85 # v3.37.8
       with:
         languages: ${{ matrix.language }}
         config-file: .github/codeql/codeql-config.yml
@@ -110,7 +110,7 @@ jobs:
         sudo make install -C build
 
     - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@v3
+      uses: github/codeql-action/analyze@42947a340483f03ba47bb1a039b2c519aab3df85 # v3.37.8
       with:
         category: "/language:${{matrix.language}}"
         upload: true
